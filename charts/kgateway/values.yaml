@@ -1,0 +1,104 @@
+# Default values for KGateway.
+
+replicaCount: 1
+
+image:
+  repository: kgateway
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Provider API keys are injected as env vars and referenced from config via ${VAR}.
+# Prefer supplying these through `existingSecret` in production rather than plaintext here.
+secretEnv:
+  # OPENAI_API_KEY: "sk-..."
+  # ANTHROPIC_API_KEY: "..."
+existingSecret: ""
+
+# Persistence layer.
+#   sqlite: single replica + a PVC-backed volume (zero external deps).
+#   postgres: set database URL below and scale replicaCount > 1 (stateless pods).
+database:
+  mode: sqlite # sqlite | postgres
+  # For postgres, an env-interpolated URL, e.g. "postgres://user:pass@host:5432/kgateway"
+  url: ""
+
+persistence:
+  enabled: true # only used when database.mode == sqlite
+  size: 1Gi
+  storageClass: ""
+  mountPath: /data
+
+# The gateway config.json. Rendered into a ConfigMap and mounted at /etc/kgateway/config.json.
+config:
+  port: 8080
+  providers:
+    openai:
+      keys:
+        - id: default
+          value: "${OPENAI_API_KEY}"
+          weight: 1
+  # --- Control-plane RBAC (M11) — token → role (viewer | operator | admin). ---
+  # Prefer ${ENV} refs backed by `secretEnv`/`existingSecret`. If tokens are declared but
+  # all resolve empty, the control plane fails CLOSED (locked), never open.
+  # admin_token: "${KGATEWAY_ADMIN_TOKEN}"
+  # api_tokens:
+  #   - { token: "${KGATEWAY_VIEWER_TOKEN}", role: viewer, name: dashboard }
+  #   - { token: "${KGATEWAY_ADMIN_TOKEN}", role: admin, name: ops }
+  # --- Observability / logs (M10). ---
+  # log_retention_days: 30
+  # content_logging: { enabled: false, max_body_bytes: 16384, capture_streaming: false }  # captures raw bodies (admin-only) — off by default
+  # --- Redaction of captured bodies (M11). key must be high-entropy; no key ⇒ mask-only. ---
+  # redaction: { enabled: true, key: "${KGATEWAY_REDACTION_KEY}", patterns: [] }
+  # --- Other. ---
+  # virtual_keys: []
+  # semantic_cache: { embedding_provider: openai, embedding_model: text-embedding-3-small, threshold: 0.95 }
+  # mcp: { builtin_tools: false }
+  # request_timeout_secs: 120
+  # cors_allow_origins: ["https://dashboard.example.com"]
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: kgateway.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations:
+  # Prometheus scrape annotations — the gateway exposes /metrics.
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/metrics"
+  prometheus.io/port: "8080"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

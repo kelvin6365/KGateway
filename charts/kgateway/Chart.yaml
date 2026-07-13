@@ -1,0 +1,16 @@
+apiVersion: v2
+name: kgateway
+description: A high-performance, open-source AI/LLM gateway (Rust + Next.js).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/kelvinkwong/kgateway
+sources:
+  - https://github.com/kelvinkwong/kgateway
+keywords:
+  - llm
+  - ai-gateway
+  - openai
+  - proxy
+maintainers:
+  - name: KGateway

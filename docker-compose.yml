@@ -1,0 +1,37 @@
+# KGateway — local/dev compose. Default: single container + SQLite volume (zero external
+# deps). Uncomment the postgres service + set config.database to scale out to stateless pods.
+#
+#   OPENAI_API_KEY=sk-... docker compose up --build
+#
+services:
+  kgateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kgateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # Provider keys + control-plane tokens are referenced from config.json via ${ENV}.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - KGATEWAY_ADMIN_TOKEN=${KGATEWAY_ADMIN_TOKEN:-}
+      - KGATEWAY_REDACTION_KEY=${KGATEWAY_REDACTION_KEY:-}
+    volumes:
+      - ./config.json:/etc/kgateway/config.json:ro
+      - kg-data:/data
+    restart: unless-stopped
+
+  # Opt-in Postgres for scale / clustering. Set config.database to
+  # "postgres://kg:kg@postgres:5432/kgateway" and you can run replicaCount > 1.
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     - POSTGRES_USER=kg
+  #     - POSTGRES_PASSWORD=kg
+  #     - POSTGRES_DB=kgateway
+  #   volumes:
+  #     - kg-pg:/var/lib/postgresql/data
+
+volumes:
+  kg-data: {}
+  # kg-pg: {}

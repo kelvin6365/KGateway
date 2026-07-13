@@ -1,0 +1,64 @@
+{
+  "port": 8080,
+  "database": "sqlite:///var/lib/kgateway/kgateway.db?mode=rwc",
+  "admin_token": "${KGATEWAY_ADMIN_TOKEN}",
+  "providers": {
+    "openai": {
+      "keys": [
+        { "id": "default", "value": "${OPENAI_API_KEY}", "weight": 1 }
+      ]
+    },
+    "anthropic": {
+      "keys": [
+        { "id": "default", "value": "${ANTHROPIC_API_KEY}", "weight": 1 }
+      ]
+    },
+    "groq": {
+      "base_url": "https://api.groq.com/openai/v1",
+      "keys": [
+        { "id": "default", "value": "${GROQ_API_KEY}", "weight": 1 }
+      ]
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434/v1",
+      "keys": [
+        { "id": "local", "value": "ollama", "weight": 1 }
+      ]
+    },
+    "zai": {
+      "kind": "anthropic",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "keys": [
+        { "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }
+      ]
+    }
+  },
+  "virtual_keys": [
+    {
+      "id": "vk_team_alpha",
+      "name": "Team Alpha",
+      "allowed_models": ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+      "denied_models": [],
+      "max_requests_per_min": 60,
+      "max_total_tokens": 1000000,
+      "max_cost_per_period": 50.0,
+      "max_cost_period_secs": 86400
+    }
+  ],
+  "semantic_cache": {
+    "embedding_provider": "openai",
+    "embedding_model": "text-embedding-3-small",
+    "threshold": 0.95
+  },
+  "content_logging": {
+    "enabled": true,
+    "max_body_bytes": 16384,
+    "capture_streaming": true
+  },
+  "mcp": {
+    "builtin_tools": true,
+    "servers": [
+      { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
+    ]
+  }
+}

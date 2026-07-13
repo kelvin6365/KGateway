@@ -1,0 +1,21 @@
+# Rust build output (rebuilt inside the image)
+target/
+**/target/
+
+# Frontend deps/build (the gateway image is the Rust binary only)
+ui/node_modules/
+ui/.next/
+ui/out/
+
+# VCS + local cruft
+.git/
+.github/
+**/*.db
+**/*.db-*
+*.log
+.DS_Store
+
+# Docs/scratch not needed to build the binary
+docs/
+scripts/
+charts/

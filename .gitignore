@@ -1,0 +1,29 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# local config with secrets
+/config.json
+
+# Next.js / node
+ui/node_modules
+ui/.next
+ui/out
+ui/.env*.local
+
+# env / secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# data
+*.db
+*.sqlite
+/data
+/b*

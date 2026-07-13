@@ -1,0 +1,236 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---------------------------------------------------------------------------
+ * Two baroque themes, one blue soul:
+ *   :root  — "Porcelain Baroque" (light): Delft blue painted on ivory china.
+ *   .dark  — "Midnight Baroque": luminous light blue on deep navy ink.
+ * The `dark` class is toggled on <html> (persisted in localStorage) — see
+ * components/baroque/use-theme.ts and the pre-paint script in app/layout.tsx.
+ * ------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  /* shadcn tokens — porcelain */
+  --background: #f6f8fb;
+  --foreground: #1b2a44;
+  --card: #ffffff;
+  --card-foreground: #1b2a44;
+  --popover: #ffffff;
+  --popover-foreground: #1b2a44;
+  --primary: #2f6fb5;
+  --primary-foreground: #f8fafc;
+  --secondary: #e7eef7;
+  --secondary-foreground: #1b2a44;
+  --muted-foreground: #5a6f8f;
+  --accent-foreground: #1b2a44;
+  --destructive: #c23434;
+  --border: #d5dfec;
+  --input: #d5dfec;
+  --ring: #2f6fb5;
+  --radius: 0.5rem;
+
+  /* Surface tokens consumed by @theme inline as --color-muted / --color-accent.
+   * Named --surface-* because the bare names are claimed by the legacy aliases
+   * below with DIFFERENT semantics (text/brand colors). */
+  --surface-muted: #eef2f8;
+  --surface-accent: #e9f0f9;
+
+  /* Sidebar */
+  --sidebar: #eef2f7;
+  --sidebar-foreground: #22334f;
+  --sidebar-primary: #2f6fb5;
+  --sidebar-primary-foreground: #f8fafc;
+  --sidebar-accent: #dfe9f4;
+  --sidebar-accent-foreground: #1b2a44;
+  --sidebar-border: #d8e2ee;
+  --sidebar-ring: #2f6fb5;
+
+  /* Status colors (promoted from statusColor() hardcoded hexes) */
+  --success: #15803d;
+  --warning: #b45309;
+  --error: #b91c1c;
+
+  /* Charts — Delft blue ramp */
+  --chart-1: #2f6fb5;
+  --chart-2: #5b93cf;
+  --chart-3: #8ab6e2;
+  --chart-4: #b5d2ee;
+  --chart-5: #d9e7f6;
+
+  /* Ornament: engraved-plate shadows */
+  --engraved-hi: rgba(255, 255, 255, 0.85);
+  --engraved-lo: rgba(27, 42, 68, 0.1);
+  --engraved-drop: rgba(27, 42, 68, 0.12);
+
+  /* -------------------------------------------------------------------------
+   * Legacy aliases — the original hand-rolled theme variables, kept so the
+   * many inline `style={{ color: "var(--muted)" }}` call sites keep working.
+   * NOTE the semantic mapping: legacy --muted was always a TEXT color and
+   * legacy --accent was the BRAND action color (shadcn --primary).
+   * Aliases reference var names, so they follow whichever theme is active.
+   * ----------------------------------------------------------------------- */
+  --bg: var(--background);
+  --fg: var(--foreground);
+  --muted: var(--muted-foreground);
+  --accent: var(--primary);
+  /* --border, --card, --sidebar already carry the same meaning above. */
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* shadcn tokens — midnight */
+  --background: #0a1020;
+  --foreground: #f4ecd8;
+  --card: #101a33;
+  --card-foreground: #f4ecd8;
+  --popover: #0d1529;
+  --popover-foreground: #f4ecd8;
+  --primary: #8fd0ff;
+  --primary-foreground: #0a1020;
+  --secondary: #1a2440;
+  --secondary-foreground: #f4ecd8;
+  --muted-foreground: #9db4d1;
+  --accent-foreground: #f4ecd8;
+  --destructive: #dc2626;
+  --border: #26314f;
+  --input: #26314f;
+  --ring: #8fd0ff;
+
+  --surface-muted: #141d38;
+  --surface-accent: #16213f;
+
+  --sidebar: #080c18;
+  --sidebar-foreground: #e6e0d0;
+  --sidebar-primary: #8fd0ff;
+  --sidebar-primary-foreground: #0a1020;
+  --sidebar-accent: #131c36;
+  --sidebar-accent-foreground: #f4ecd8;
+  --sidebar-border: #1c2745;
+  --sidebar-ring: #8fd0ff;
+
+  --success: #34c073;
+  --warning: #e8a33d;
+  --error: #e05252;
+
+  /* Charts — luminous blue ramp */
+  --chart-1: #8fd0ff;
+  --chart-2: #5fa8e0;
+  --chart-3: #3d7fc0;
+  --chart-4: #2b5d94;
+  --chart-5: #1d4067;
+
+  --engraved-hi: rgba(143, 208, 255, 0.07);
+  --engraved-lo: rgba(0, 0, 0, 0.45);
+  --engraved-drop: rgba(0, 0, 0, 0.6);
+}
+
+@theme inline {
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --font-wordmark: var(--font-wordmark);
+  --font-heading: var(--font-display);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--surface-accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--surface-muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1,
+  h2 {
+    @apply font-display;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 30%, transparent);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Baroque ornament utilities
+ * ------------------------------------------------------------------------- */
+
+/* Engraved plate: hairline border + inner top sheen over a lower bevel, like
+ * an intaglio engraving catching light from above. Theme-aware via vars. */
+.border-engraved {
+  border: 1px solid var(--border);
+  box-shadow:
+    inset 0 1px 0 0 var(--engraved-hi),
+    inset 0 -1px 0 0 var(--engraved-lo),
+    0 4px 24px -8px var(--engraved-drop);
+}
+
+/* Tiling damask texture, applied as a MASK so the motif is painted in the
+ * active theme's primary blue (luminous at midnight, Delft on porcelain).
+ * Used at very low layer opacity between the WebGL canvas and the shell. */
+.bg-damask {
+  background-color: var(--primary);
+  -webkit-mask-image: url("/textures/damask.svg");
+  mask-image: url("/textures/damask.svg");
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  -webkit-mask-size: 320px 320px;
+  mask-size: 320px 320px;
+}
+
+/* Soft luminous halo for the blue accents (logo crest, active nav). */
+.glow-primary {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--primary) 45%, transparent));
+}
+
+/* Thin scrollbars that match the active surfaces. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <!-- Tileable damask motif: central palmette with mirrored acanthus scrolls,
+       quarter medallions at the corners so edges meet seamlessly.
+       Rendered at very low layer opacity — keep strokes simple. -->
+  <g fill="none" stroke="#8fd0ff" stroke-width="1" stroke-linecap="round" opacity="0.6">
+    <!-- central palmette -->
+    <path d="M80 52 C 74 62 74 72 80 82 C 86 72 86 62 80 52 Z"/>
+    <path d="M80 58 C 70 64 66 74 68 86 C 74 80 78 72 80 62"/>
+    <path d="M80 58 C 90 64 94 74 92 86 C 86 80 82 72 80 62"/>
+    <!-- mirrored scroll curls beneath -->
+    <path d="M80 86 C 72 94 62 96 56 90 C 52 86 55 80 60 81 C 64 82 64 87 60 88"/>
+    <path d="M80 86 C 88 94 98 96 104 90 C 108 86 105 80 100 81 C 96 82 96 87 100 88"/>
+    <!-- crown flourish above -->
+    <path d="M80 52 C 76 44 70 42 66 46 M80 52 C 84 44 90 42 94 46"/>
+    <circle cx="80" cy="38" r="1.6"/>
+    <!-- side buds on the horizontal tile axis -->
+    <path d="M6 80 C 12 74 20 74 26 80 C 20 86 12 86 6 80 Z"/>
+    <path d="M134 80 C 140 74 148 74 154 80 C 148 86 140 86 134 80 Z"/>
+    <!-- quarter medallions at corners (tile seamlessly across edges) -->
+    <path d="M0 22 C 12 22 22 12 22 0 M0 14 C 8 14 14 8 14 0"/>
+    <path d="M160 22 C 148 22 138 12 138 0 M160 14 C 152 14 146 8 146 0"/>
+    <path d="M0 138 C 12 138 22 148 22 160 M0 146 C 8 146 14 152 14 160"/>
+    <path d="M160 138 C 148 138 138 148 138 160 M160 146 C 152 146 146 152 146 160"/>
+    <!-- sparse fleuron dots -->
+    <circle cx="40" cy="40" r="1"/>
+    <circle cx="120" cy="40" r="1"/>
+    <circle cx="40" cy="120" r="1"/>
+    <circle cx="120" cy="120" r="1"/>
+    <circle cx="80" cy="122" r="1.4"/>
+  </g>
+</svg>
