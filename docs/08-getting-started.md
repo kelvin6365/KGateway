@@ -135,6 +135,89 @@ logging, failover, and caching all apply. Streaming and tool use are fully trans
      gateway; with no `provider/` prefix it routes to the default `openai` provider and fails with
      `400 invalid request`. Use `model` / `ANTHROPIC_MODEL` to force the route.
 
+## 3c. Use with OMP CLI (custom provider)
+
+<p align="center">
+  <img src="./images/omp-logo.svg" alt="omp" width="64" />
+</p>
+
+<p align="center">
+  <a href="https://omp.sh/docs/custom-models">📖 Official OMP custom-models docs</a>
+</p>
+
+The **OMP CLI** (Oh My Pi — a coding agent for the terminal with subagents, plan mode, LSP, DAP,
+and hindsight memory) can route through KGateway by registering it as a custom provider. Because
+KGateway exposes an Anthropic Messages endpoint, the OMP CLI talks `anthropic-messages` wire
+format and KGateway handles upstream routing, governance, logging, and caching.
+
+> **Custom providers/models in OMP live in `~/.omp/agent/models.yml`** (the legacy `models.json`
+> is migrated on first load). See the
+> [official custom-models reference](https://omp.sh/docs/custom-models) for the full schema.
+
+1. Configure the target upstream provider in KGateway's `config.json` (e.g. z.ai's GLM Coding
+   Plan over the Anthropic protocol):
+
+   ```json
+   "zai": {
+     "kind": "anthropic",
+     "base_url": "https://api.z.ai/api/anthropic",
+     "keys": [{ "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }]
+   }
+   ```
+
+2. Run the gateway (`cargo run -p kgateway-server -- --config config.json`).
+
+3. Register KGateway as a custom provider in `~/.omp/agent/models.yml`:
+
+   ```yaml
+   # ~/.omp/agent/models.yml
+   providers:
+     my-custom-provider:
+       baseUrl: http://localhost:8080
+       api: anthropic-messages
+       apiKey: test
+       authHeader: false
+       models:
+         - id: zai/glm-5.2
+           name: zai/glm-5.2
+           reasoning: true
+           input: [text, image]
+           contextWindow: 1000000
+   ```
+
+4. Select the provider in the OMP CLI (`/model` picker or `model` in `config.yml`) and send a
+   request. Watch it flow through the dashboard **Logs** page.
+
+### Field reference
+
+| Field | Required | Description |
+|---|---|---|
+| `baseUrl` | yes | KGateway listen address. The OMP CLI appends `/v1/messages` itself, so set the bare origin (`http://localhost:8080`), not the full endpoint path. |
+| `api` | yes | Wire transport. Use `anthropic-messages` to map to KGateway's `/v1/messages` ingress. Other options: `openai-completions`, `openai-responses`, `google-generative-ai`, `google-vertex`. |
+| `auth` | no | Auth scheme: `apiKey` (default), `none`, or `oauth`. |
+| `authHeader` | no | Set `false` to suppress the `Authorization` header entirely. KGateway's `/v1/messages` endpoint doesn't require one by default — set this so the OMP CLI doesn't send a spurious header that could trip strict-mode governance. |
+| `apiKey` | no | Ignored when `authHeader: false`; put any placeholder. When governance **is** on, set this to a virtual key id clients must present. Checked as an env-var name first, then as a literal token. |
+| `models[].id` | yes | **Must use the `provider/model` prefix** so KGateway routes correctly. `zai/glm-5.2` routes to the `zai` provider from step 1. |
+| `models[].name` | yes | Display label in the `/model` picker. |
+| `models[].reasoning` | no | `true` if the model accepts a thinking level. Enables the `:level` suffix and Shift+Tab cycling. |
+| `models[].input` | no | Modalities — any of `text`, `image`. |
+| `models[].contextWindow` | yes | Token budget. Used for the live context window. |
+| `models[].maxTokens` | no | Max output tokens. |
+| `models[].cost` | no | Per-million-token rates: `{ input, output, cacheRead, cacheWrite }`. Surfaced in `/usage`. |
+| `models[].contextPromotionTarget` | no | When a turn would exceed `contextWindow`, the OMP CLI swaps to this model id before any fallback chain runs. |
+
+### Traps
+
+- **Model prefix:** an unprefixed model id (e.g. `glm-5.2` alone) routes to the default `openai`
+  provider and fails with `400 invalid request`. Always include the `provider/` prefix in
+  `models[].id` (e.g. `zai/glm-5.2`).
+- **`authHeader` vs governance:** if `virtual_keys` / `api_tokens` are configured in KGateway
+  (strict mode), set `authHeader: true` (or remove it) and put a virtual key id in `apiKey`.
+  Otherwise every request returns 401.
+- **`disableStrictTools: true`** may be needed for some third-party Anthropic-compatible endpoints
+  that reject the strict tool-schema field — add it to the provider block if you see tool-schema
+  errors.
+
 ## 4. Beyond the basics (optional)
 
 Everything below is opt-in config — see [16-configuration.md](./16-configuration.md) for the
@@ -227,5 +310,10 @@ cargo bench -p kgateway-core                              # hot-path benchmarks
   `claude-*` id) because only the `ANTHROPIC_DEFAULT_*_MODEL` aliases were set. Unprefixed models
   route to the default `openai` provider. Set `model` / `ANTHROPIC_MODEL` to `zai/glm-4.6` (see §3b).
 - **Claude Code: 404 on every request** — `ANTHROPIC_BASE_URL` includes `/v1/messages`; drop it (see §3b).
+- **OMP CLI: `400 invalid request`** — the `models[].id` is missing the `provider/` prefix, so
+  KGateway routes to the default `openai` provider. Set it to `zai/glm-5.2`, not `glm-5.2` (see §3c).
+- **OMP CLI: 401 / auth errors** — `authHeader: false` is set but `virtual_keys` are configured
+  (strict mode). Either set `authHeader: true` + a virtual key in `apiKey`, or remove governance
+  (see §3c).
 - **`no eligible API keys`** — the key's `models` allow-list excludes the requested model, or `${ENV}` var is unset.
 - **`operation not supported`** — that provider lacks the capability (e.g. rerank on OpenAI); use a provider that supports it (Cohere for rerank).
