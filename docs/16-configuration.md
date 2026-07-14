@@ -167,7 +167,7 @@ See [12-content-capture-plan.md](./12-content-capture-plan.md).
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch. When false, no bodies are captured (zero-cost). |
-| `max_body_bytes` | usize | `16384` (16 KiB) | Per-body truncation budget in bytes. |
+| `max_body_bytes` | usize | `16384` (16 KiB) | Per-body truncation budget in bytes. `0` disables truncation entirely — bodies are captured **in full** (accepting unbounded log-store growth and, for streamed responses, holding the whole completion in memory per active stream). |
 | `capture_streaming` | bool | `false` | Capture the assembled response of streamed chat (tee + accumulate). When false, streamed requests capture the request body only. |
 
 ---

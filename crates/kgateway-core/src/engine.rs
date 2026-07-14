@@ -54,10 +54,12 @@ fn backoff_delay(attempt: u32, rng: &mut StdRng) -> std::time::Duration {
 
 /// Content-capture policy (M10 Phase 2). Off by default; when `enabled`, the engine
 /// serializes request/response payloads into the `CallRecord` (truncated to
-/// `max_body_bytes`). See `docs/12-content-capture-plan.md`.
+/// `max_body_bytes`; `0` disables truncation and captures bodies in full).
+/// See `docs/12-content-capture-plan.md`.
 #[derive(Debug, Clone)]
 pub struct ContentCapture {
     pub enabled: bool,
+    /// Per-body truncation budget in bytes. `0` means unbounded (capture in full).
     pub max_body_bytes: usize,
     /// Capture the assembled response of streamed chat (tee + accumulate). When false,
     /// streamed requests capture the request body only.
@@ -76,7 +78,11 @@ impl Default for ContentCapture {
 
 /// Truncate a UTF-8 string to at most `max` bytes (on a char boundary), appending a
 /// marker when truncation occurred. Used to bound captured payload size.
+/// `max == 0` means unbounded: the string is returned untouched, no marker.
 fn truncate_utf8(mut s: String, max: usize) -> String {
+    if max == 0 {
+        return s;
+    }
     if s.len() <= max {
         return s;
     }
@@ -139,8 +145,17 @@ struct StreamCaptureGuard {
 impl StreamCaptureGuard {
     /// Append a response delta, clamped to the remaining byte budget on a char boundary
     /// (so a single large delta can't overshoot `max_bytes`). No-op when body capture is off.
+    /// `max_bytes == 0` means unbounded: every delta is accumulated in full, so the whole
+    /// streamed completion is held in memory per active stream until the record is emitted.
     fn push_delta(&mut self, text: &str) {
-        if !self.capture_body || self.acc.len() >= self.max_bytes {
+        if !self.capture_body {
+            return;
+        }
+        if self.max_bytes == 0 {
+            self.acc.push_str(text);
+            return;
+        }
+        if self.acc.len() >= self.max_bytes {
             return;
         }
         let remaining = self.max_bytes - self.acc.len();
@@ -1253,6 +1268,30 @@ mod tests {
         assert!(out.len() <= 4, "len was {}", out.len());
     }
 
+    #[test]
+    fn truncate_utf8_zero_budget_is_unbounded() {
+        // 0 is the "no cap" sentinel: the string comes back whole, no marker.
+        let s = "x".repeat(64 * 1024);
+        let out = truncate_utf8(s.clone(), 0);
+        assert_eq!(out, s);
+        assert!(!out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn capture_enabled_zero_budget_keeps_full_body() {
+        let eng = Kgateway::new(Registry::new()).with_content_capture(ContentCapture {
+            enabled: true,
+            max_body_bytes: 0,
+            capture_streaming: false,
+        });
+        // Larger than the 16 KiB default to prove no cap applies anywhere.
+        let big = "a".repeat(32 * 1024);
+        let out = eng.capture(&serde_json::json!({ "k": big })).unwrap();
+        assert!(out.len() > 32 * 1024, "len was {}", out.len());
+        assert!(out.contains(&big));
+        assert!(!out.ends_with("…[truncated]"));
+    }
+
     // A provider that always returns a fixed successful response.
     struct OkProvider;
 
@@ -1677,14 +1716,17 @@ mod tests {
         }
     }
 
-    fn capture_engine(records: Arc<std::sync::Mutex<Vec<CallRecord>>>) -> Kgateway {
+    fn capture_engine(
+        records: Arc<std::sync::Mutex<Vec<CallRecord>>>,
+        max_body_bytes: usize,
+    ) -> Kgateway {
         let mut registry = Registry::new();
         registry.register(Arc::new(StreamProvider), vec![key("k")]);
         Kgateway::new(registry)
             .with_observer(Arc::new(RecordingObserver { records }))
             .with_content_capture(ContentCapture {
                 enabled: true,
-                max_body_bytes: 1024,
+                max_body_bytes,
                 capture_streaming: true,
             })
     }
@@ -1702,7 +1744,7 @@ mod tests {
     #[tokio::test]
     async fn stream_capture_records_full_response_on_completion() {
         let records = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let engine = capture_engine(records.clone());
+        let engine = capture_engine(records.clone(), 1024);
         let mut ctx = Ctx::new();
         let mut r = req();
         r.stream = Some(true);
@@ -1720,9 +1762,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_capture_zero_budget_accumulates_in_full() {
+        // max_body_bytes: 0 = unbounded — every delta accumulates, none are clamped.
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = capture_engine(records.clone(), 0);
+        let mut ctx = Ctx::new();
+        let mut r = req();
+        r.stream = Some(true);
+
+        let stream = engine.chat_stream(&mut ctx, r).await.expect("stream");
+        let _: Vec<_> = stream.collect().await;
+
+        wait_for_record(&records).await;
+        let recs = records.lock().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].response_body.as_deref(), Some("STREAM_PART2"));
+    }
+
+    #[tokio::test]
     async fn stream_capture_records_partial_on_early_drop() {
         let records = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let engine = capture_engine(records.clone());
+        let engine = capture_engine(records.clone(), 1024);
         let mut ctx = Ctx::new();
         let mut r = req();
         r.stream = Some(true);

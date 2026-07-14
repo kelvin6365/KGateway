@@ -142,12 +142,21 @@ pub async fn build_configured_engine(
             capture_streaming: cc.capture_streaming,
         });
         if cc.enabled {
-            tracing::warn!(
-                max_body_bytes = cc.max_body_bytes,
-                capture_streaming = cc.capture_streaming,
-                "content capture ENABLED — request/response payloads (may contain secrets/PII) \
-                 are logged and returned to admins via GET /api/logs/{{id}}"
-            );
+            if cc.max_body_bytes == 0 {
+                tracing::warn!(
+                    capture_streaming = cc.capture_streaming,
+                    "content capture ENABLED with max_body_bytes = 0 (UNBOUNDED) — full \
+                     request/response payloads (may contain secrets/PII) are persisted and \
+                     returned to admins via GET /api/logs/{{id}}"
+                );
+            } else {
+                tracing::warn!(
+                    max_body_bytes = cc.max_body_bytes,
+                    capture_streaming = cc.capture_streaming,
+                    "content capture ENABLED — request/response payloads (may contain \
+                     secrets/PII) are logged and returned to admins via GET /api/logs/{{id}}"
+                );
+            }
         }
     }
 

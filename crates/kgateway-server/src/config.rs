@@ -137,7 +137,8 @@ pub struct ContentLoggingConfig {
     /// Master switch. When false (the default), no payloads are captured.
     #[serde(default)]
     pub enabled: bool,
-    /// Per-body truncation budget in bytes. Defaults to 16 KiB.
+    /// Per-body truncation budget in bytes. Defaults to 16 KiB. `0` disables truncation
+    /// (bodies are captured in full).
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
     /// Capture the assembled response of streamed chat (tee + accumulate). When false,

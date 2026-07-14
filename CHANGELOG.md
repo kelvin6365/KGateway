@@ -8,6 +8,13 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Unbounded content capture (`max_body_bytes: 0`).** `content_logging.max_body_bytes` now
+  treats `0` as "no cap": request/response bodies are captured **in full** (no `…[truncated]`
+  marker), for both unary and streamed responses. The default stays 16 KiB. **Behavior change
+  for pre-existing `max_body_bytes: 0` configs:** `0` previously truncated every captured body
+  to an *empty string* (record the call, store no content) — it now stores the *complete*
+  payload. If you relied on `0` to suppress bodies, set `enabled: false` instead.
+
 - **Anthropic Messages ingress (`POST /v1/messages`).** KGateway now accepts inbound
   Anthropic-protocol requests, so Anthropic clients — **Claude Code**, the Anthropic SDKs — can
   route *through* the gateway to any provider, with governance / logging / failover / cache all

@@ -176,7 +176,12 @@ function ContentSection({
   }
 
   const truncated = !!body && isTruncated(body);
-  const displayText = body ? (mode === "raw" ? body : prettyPrintBody(body)) : "";
+  // Memoized: unbounded capture can yield multi-hundred-KB bodies, and re-parsing
+  // them on every render would jank the drawer.
+  const displayText = useMemo(
+    () => (body ? (mode === "raw" ? body : prettyPrintBody(body)) : ""),
+    [body, mode]
+  );
 
   return (
     <div className="flex flex-col gap-2">
@@ -226,7 +231,7 @@ function ContentSection({
           Could not load captured content ({error}).
         </div>
       ) : body ? (
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background/60 px-3 py-2 font-mono text-xs">
+        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background/60 px-3 py-2 font-mono text-xs">
           {displayText}
         </pre>
       ) : (
