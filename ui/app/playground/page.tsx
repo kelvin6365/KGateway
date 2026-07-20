@@ -3,8 +3,9 @@
 // Playground: a multi-turn chat thread through the gateway with live streaming,
 // a params sidebar (model / system prompt / temperature / stream), per-response
 // latency + token metadata, and Stop (abort) for in-flight requests. Model
-// suggestions come from configured providers and recently-logged provider/model
-// pairs (both admin-gated — the datalist is simply empty in strict mode).
+// suggestions merge the aggregated /v1/models listing (live upstream inventory,
+// no admin token) with configured providers and recently-logged provider/model
+// pairs (admin-gated; those two are simply empty without a token).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -13,6 +14,7 @@ import {
   chatCompletion,
   chatCompletionStream,
   getLogs,
+  getModels,
   getProviders,
   type ChatMessage,
 } from "@/lib/api";
@@ -116,14 +118,23 @@ export default function PlaygroundPage() {
     retry: false,
     staleTime: 60000,
   });
+  // Live upstream inventory via the gateway's aggregated /v1/models (server-cached;
+  // no admin token needed). The richest source: every id is directly routable.
+  const { data: listedModels } = useQuery({
+    queryKey: ["models"],
+    queryFn: getModels,
+    retry: false,
+    staleTime: 60000,
+  });
   const modelSuggestions = useMemo(() => {
     const set = new Set<string>();
+    for (const m of listedModels ?? []) set.add(m.id);
     for (const l of recentPage?.logs ?? []) {
       if (l.provider && l.model) set.add(`${l.provider}/${l.model}`);
     }
     for (const p of providers ?? []) set.add(`${p.name}/`);
     return Array.from(set).sort();
-  }, [recentPage, providers]);
+  }, [listedModels, recentPage, providers]);
 
   // Keep the newest message in view while the thread grows / streams.
   useEffect(() => {

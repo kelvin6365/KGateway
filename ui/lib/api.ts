@@ -490,6 +490,25 @@ export async function getMcpTools(): Promise<McpTool[]> {
 }
 
 /** GET /api/providers — configured providers + their capabilities. */
+/** One entry from the aggregated `GET /v1/models` listing (OpenAI list format). */
+export interface ListedModel {
+  id: string; // routable "provider/model"
+  owned_by: string; // provider name
+  created: number;
+}
+
+/**
+ * Aggregated model list — the gateway fans out to each configured provider's
+ * official list-models API and returns routable `provider/model` ids. Data-plane:
+ * no admin token needed (a virtual key is required only in strict mode).
+ */
+export async function getModels(): Promise<ListedModel[]> {
+  const res = await fetch(`${BASE_URL}/v1/models`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = (await res.json().catch(() => ({}))) as { data?: ListedModel[] };
+  return body.data ?? [];
+}
+
 export async function getProviders(): Promise<ProviderSummary[]> {
   const res = await fetch(`${BASE_URL}/api/providers`, {
     cache: "no-store",
