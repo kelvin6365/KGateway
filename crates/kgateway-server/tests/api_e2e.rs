@@ -241,3 +241,173 @@ async fn analytics_endpoints_respond() {
         assert_eq!(unauth, 401, "{uri} should require auth");
     }
 }
+
+#[tokio::test]
+async fn v1_models_aggregates_across_providers_and_skips_failures() {
+    // OpenAI-compatible upstream: GET {base}/models.
+    let openai_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "glm-5.2", "object": "model", "created": 1781625600, "owned_by": "z-ai" },
+                { "id": "glm-4.7", "object": "model", "created": 1766332800, "owned_by": "z-ai" }
+            ]
+        })))
+        .mount(&openai_upstream)
+        .await;
+
+    // Anthropic-compatible upstream: GET {base}/v1/models.
+    let anthropic_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                { "type": "model", "id": "glm-5.2", "display_name": "GLM-5.2",
+                  "created_at": "2026-06-17T00:00:00Z" }
+            ],
+            "hasMore": false
+        })))
+        .mount(&anthropic_upstream)
+        .await;
+
+    // A dead upstream (no mock mounted → 404) must be skipped, not fail the listing.
+    let dead_upstream = MockServer::start().await;
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        "zai-coding".to_string(),
+        ProviderConfig {
+            kind: Some("openai".into()),
+            base_url: Some(openai_upstream.uri()),
+            keys: vec![KeyConfig {
+                id: "default".into(),
+                value: "test".into(),
+                weight: 1,
+                models: vec![],
+            }],
+        },
+    );
+    providers.insert(
+        "zai".to_string(),
+        ProviderConfig {
+            kind: Some("anthropic".into()),
+            base_url: Some(anthropic_upstream.uri()),
+            keys: vec![KeyConfig {
+                id: "coding-plan".into(),
+                value: "test".into(),
+                weight: 1,
+                models: vec![],
+            }],
+        },
+    );
+    providers.insert(
+        "dead".to_string(),
+        ProviderConfig {
+            kind: Some("openai".into()),
+            base_url: Some(dead_upstream.uri()),
+            keys: vec![KeyConfig {
+                id: "default".into(),
+                value: "test".into(),
+                weight: 1,
+                models: vec![],
+            }],
+        },
+    );
+    // A provider whose key resolves empty (unset ${ENV}) is skipped without a fetch.
+    providers.insert(
+        "keyless".to_string(),
+        ProviderConfig {
+            kind: Some("openai".into()),
+            base_url: Some(dead_upstream.uri()),
+            keys: vec![KeyConfig {
+                id: "default".into(),
+                value: String::new(),
+                weight: 1,
+                models: vec![],
+            }],
+        },
+    );
+
+    let mut config = Config {
+        providers,
+        ..Config::default()
+    };
+    config.port = 0;
+    let state = app::build_state(config, "test-config.json".into()).await;
+    let app = app::build_router(state);
+
+    let (status, body) = send(&app, get("/v1/models", None)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["object"], "list");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    // Sorted, provider-prefixed, dead + keyless providers skipped.
+    assert_eq!(
+        ids,
+        vec!["zai-coding/glm-4.7", "zai-coding/glm-5.2", "zai/glm-5.2"]
+    );
+    let first = &body["data"][0];
+    assert_eq!(first["object"], "model");
+    assert_eq!(first["owned_by"], "zai-coding");
+    assert_eq!(first["created"], 1766332800);
+}
+
+#[tokio::test]
+async fn v1_models_is_cached_and_vkey_gated_in_strict_mode() {
+    // Upstream expects EXACTLY ONE list fetch — the second /v1/models must be a cache hit.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [{ "id": "kimi-k3", "object": "model", "created": 1, "owned_by": "moonshot" }]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        "moonshot".to_string(),
+        ProviderConfig {
+            kind: Some("openai".into()),
+            base_url: Some(upstream.uri()),
+            keys: vec![KeyConfig {
+                id: "default".into(),
+                value: "test".into(),
+                weight: 1,
+                models: vec![],
+            }],
+        },
+    );
+    let mut config = Config {
+        providers,
+        virtual_keys: vec![kgateway_server::config::VirtualKeyConfig {
+            id: "vk_test".into(),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
+    config.port = 0;
+    let state = app::build_state(config, "test-config.json".into()).await;
+    let app = app::build_router(state);
+
+    // Strict mode: anonymous and wrong-key listings are rejected before any fetch.
+    let (unauth, _) = send(&app, get("/v1/models", None)).await;
+    assert_eq!(unauth, 401);
+    let (wrong, _) = send(&app, get("/v1/models", Some("nope"))).await;
+    assert_eq!(wrong, 401);
+
+    // Two authorized calls: same body, only one upstream fetch (expect(1) verifies on drop).
+    let (s1, b1) = send(&app, get("/v1/models", Some("vk_test"))).await;
+    let (s2, b2) = send(&app, get("/v1/models", Some("vk_test"))).await;
+    assert_eq!((s1, s2), (200, 200));
+    assert_eq!(b1, b2);
+    assert_eq!(b1["data"][0]["id"], "moonshot/kimi-k3");
+}

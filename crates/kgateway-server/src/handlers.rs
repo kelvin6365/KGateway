@@ -532,6 +532,180 @@ pub async fn providers(State(state): State<SharedState>) -> Response {
     Json(serde_json::json!({ "providers": summaries })).into_response()
 }
 
+// ---- Aggregated model listing ----
+
+/// How long an aggregated `/v1/models` response is served from cache before the
+/// gateway re-fans-out to the upstreams. Model inventories change rarely; this
+/// mainly protects interactive pickers from hammering every vendor.
+const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cached `/v1/models` aggregate. `tokio::time::Instant` so paused-clock tests can
+/// exercise expiry deterministically.
+pub struct ModelsCache {
+    pub at: tokio::time::Instant,
+    /// Provider-set fingerprint at fill time — a config change (add/remove/repoint
+    /// a provider) invalidates the cache immediately, without waiting out the TTL.
+    pub fingerprint: String,
+    pub body: serde_json::Value,
+}
+
+/// Fingerprint of everything `/v1/models` depends on: provider names, wire kinds,
+/// base URLs, and key ids/count (not key values — those never appear in output).
+fn providers_fingerprint(config: &crate::config::Config) -> String {
+    let mut parts: Vec<String> = config
+        .providers
+        .iter()
+        .map(|(name, pc)| {
+            let key_ids: Vec<&str> = pc.keys.iter().map(|k| k.id.as_str()).collect();
+            format!(
+                "{name}|{}|{}|{}",
+                pc.kind.as_deref().unwrap_or("-"),
+                pc.base_url.as_deref().unwrap_or("-"),
+                key_ids.join(",")
+            )
+        })
+        .collect();
+    parts.sort();
+    parts.join(";")
+}
+
+/// Wire protocol a provider's model-list endpoint speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListWire {
+    OpenAi,
+    Anthropic,
+}
+
+/// Resolve where (and how) to fetch a provider's model list, mirroring the
+/// `build_engine` kind/name inference. Returns `None` for providers with no
+/// listable HTTP endpoint (bedrock/azure/gemini/cohere).
+fn model_list_target(name: &str, pc: &ProviderConfig) -> Option<(ListWire, String)> {
+    match pc.kind.as_deref() {
+        Some("anthropic") => {
+            let base = pc
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+            return Some((ListWire::Anthropic, base));
+        }
+        Some("openai") => {
+            let base = pc
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            return Some((ListWire::OpenAi, base));
+        }
+        Some(_) => return None,
+        None => {}
+    }
+    match name {
+        "openai" => Some((
+            ListWire::OpenAi,
+            pc.base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+        )),
+        "anthropic" => Some((
+            ListWire::Anthropic,
+            pc.base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+        )),
+        "cohere" => None,
+        other => match kgateway_providers::openai_compat::default_base_url(other) {
+            Some(default) => Some((
+                ListWire::OpenAi,
+                pc.base_url.clone().unwrap_or_else(|| default.to_string()),
+            )),
+            None => pc.base_url.clone().map(|url| (ListWire::OpenAi, url)),
+        },
+    }
+}
+
+/// `GET /v1/models` — OpenAI-compatible aggregated model list. Fans out to every
+/// configured provider's official list endpoint concurrently and returns the
+/// union with `provider/model`-prefixed ids (the gateway's routing convention).
+/// Best-effort: a provider that errors or has no listable endpoint is skipped.
+pub async fn list_models(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    let config = state.config.load_full();
+
+    // Strict-mode governance: when virtual keys are configured, this data-plane read
+    // requires a known key too — same rule the engine applies to chat. (The listing
+    // exposes provider + model inventory; don't serve it anonymously in strict mode.)
+    if !config.virtual_keys.is_empty() {
+        let authorized = vkey_from_headers(&headers)
+            .is_some_and(|k| config.virtual_keys.iter().any(|v| v.id == k));
+        if !authorized {
+            return error_response(KgError::new(
+                KgErrorKind::Auth,
+                "missing or unknown virtual key",
+            ));
+        }
+    }
+
+    // Serve from cache while fresh AND the provider set is unchanged.
+    let fingerprint = providers_fingerprint(&config);
+    {
+        let cache = state.models_cache.lock().await;
+        if let Some(c) = cache.as_ref() {
+            if c.fingerprint == fingerprint && c.at.elapsed() < MODELS_CACHE_TTL {
+                return Json(c.body.clone()).into_response();
+            }
+        }
+    }
+
+    let fetches = config.providers.iter().filter_map(|(name, pc)| {
+        let (wire, base) = model_list_target(name, pc)?;
+        // First key with a non-empty resolved value; skip providers whose ${ENV} is unset.
+        let key = pc
+            .keys
+            .iter()
+            .map(|k| k.resolve())
+            .find(|k| !k.value.is_empty())?;
+        let name = name.clone();
+        Some(async move {
+            let result = match wire {
+                ListWire::OpenAi => {
+                    kgateway_providers::model_listing::list_openai_models(&base, &key.value).await
+                }
+                ListWire::Anthropic => {
+                    kgateway_providers::model_listing::list_anthropic_models(&base, &key.value)
+                        .await
+                }
+            };
+            (name, result)
+        })
+    });
+
+    let mut data: Vec<serde_json::Value> = Vec::new();
+    for (name, result) in futures::future::join_all(fetches).await {
+        match result {
+            Ok(models) => {
+                for m in models {
+                    data.push(serde_json::json!({
+                        "id": format!("{name}/{}", m.id),
+                        "object": "model",
+                        "created": m.created.unwrap_or(0),
+                        "owned_by": name,
+                    }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(provider = %name, error = %e, "model list fetch failed; skipping")
+            }
+        }
+    }
+    data.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+
+    let body = serde_json::json!({ "object": "list", "data": data });
+    *state.models_cache.lock().await = Some(ModelsCache {
+        at: tokio::time::Instant::now(),
+        fingerprint,
+        body: body.clone(),
+    });
+    Json(body).into_response()
+}
+
 // ---- Live config (control-plane, admin-guarded) ----
 
 /// `GET /api/status` — non-secret runtime + config summary for the dashboard (feature
@@ -838,6 +1012,142 @@ fn store_error_response(e: kgateway_store::StoreError) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod model_list_target_tests {
+    use super::*;
+
+    fn pc(kind: Option<&str>, base_url: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            kind: kind.map(|s| s.to_string()),
+            base_url: base_url.map(|s| s.to_string()),
+            keys: vec![],
+        }
+    }
+
+    #[test]
+    fn explicit_kind_wins_over_name_inference() {
+        // A custom-named Anthropic-compatible endpoint (z.ai GLM Coding Plan).
+        let target = model_list_target(
+            "my-zai",
+            &pc(Some("anthropic"), Some("https://api.z.ai/api/anthropic")),
+        );
+        assert_eq!(
+            target,
+            Some((
+                ListWire::Anthropic,
+                "https://api.z.ai/api/anthropic".to_string()
+            ))
+        );
+
+        // Explicit openai kind without base_url falls back to api.openai.com.
+        let target = model_list_target("proxy", &pc(Some("openai"), None));
+        assert_eq!(
+            target,
+            Some((ListWire::OpenAi, "https://api.openai.com/v1".to_string()))
+        );
+
+        // Kinds with no listable HTTP endpoint are skipped.
+        assert_eq!(model_list_target("aws", &pc(Some("bedrock"), None)), None);
+        assert_eq!(
+            model_list_target("az", &pc(Some("azure"), Some("https://r.openai.azure.com"))),
+            None
+        );
+    }
+
+    #[test]
+    fn native_and_compat_names_infer_wire_and_base() {
+        assert_eq!(
+            model_list_target("openai", &pc(None, None)),
+            Some((ListWire::OpenAi, "https://api.openai.com/v1".to_string()))
+        );
+        assert_eq!(
+            model_list_target("anthropic", &pc(None, None)),
+            Some((ListWire::Anthropic, "https://api.anthropic.com".to_string()))
+        );
+        // Known compat vendor uses its default base; an override wins.
+        assert_eq!(
+            model_list_target("zai-coding", &pc(None, None)),
+            Some((
+                ListWire::OpenAi,
+                "https://api.z.ai/api/coding/paas/v4".to_string()
+            ))
+        );
+        assert_eq!(
+            model_list_target("groq", &pc(None, Some("http://localhost:9/v1"))),
+            Some((ListWire::OpenAi, "http://localhost:9/v1".to_string()))
+        );
+        // Cohere's list API isn't OpenAI/Anthropic wire — skipped.
+        assert_eq!(model_list_target("cohere", &pc(None, None)), None);
+    }
+
+    #[test]
+    fn unknown_names_need_a_base_url() {
+        assert_eq!(
+            model_list_target("selfhosted", &pc(None, Some("http://gpu:8000/v1"))),
+            Some((ListWire::OpenAi, "http://gpu:8000/v1".to_string()))
+        );
+        assert_eq!(model_list_target("selfhosted", &pc(None, None)), None);
+    }
+
+    #[test]
+    fn fingerprint_tracks_provider_set_but_not_key_values() {
+        use crate::config::{Config, KeyConfig};
+
+        let key = |id: &str, value: &str| KeyConfig {
+            id: id.into(),
+            value: value.into(),
+            weight: 1,
+            models: vec![],
+        };
+        let cfg = |entries: Vec<(&str, ProviderConfig)>| Config {
+            providers: entries.into_iter().map(|(n, p)| (n.into(), p)).collect(),
+            ..Config::default()
+        };
+        let provider =
+            |kind: Option<&str>, base: Option<&str>, keys: Vec<KeyConfig>| ProviderConfig {
+                kind: kind.map(String::from),
+                base_url: base.map(String::from),
+                keys,
+            };
+
+        let a = cfg(vec![
+            (
+                "zai",
+                provider(Some("anthropic"), Some("https://a"), vec![key("k", "s1")]),
+            ),
+            ("moonshot", provider(None, None, vec![key("k", "s2")])),
+        ]);
+        // Same provider set, different insertion order + different key VALUES → same print.
+        let b = cfg(vec![
+            ("moonshot", provider(None, None, vec![key("k", "other")])),
+            (
+                "zai",
+                provider(
+                    Some("anthropic"),
+                    Some("https://a"),
+                    vec![key("k", "rotated")],
+                ),
+            ),
+        ]);
+        assert_eq!(providers_fingerprint(&a), providers_fingerprint(&b));
+
+        // Changing a base_url, kind, key id, or the provider set changes the print.
+        let c = cfg(vec![(
+            "zai",
+            provider(Some("anthropic"), Some("https://b"), vec![key("k", "s1")]),
+        )]);
+        assert_ne!(providers_fingerprint(&a), providers_fingerprint(&c));
+        let d = cfg(vec![
+            (
+                "zai",
+                provider(Some("anthropic"), Some("https://a"), vec![key("k2", "s1")]),
+            ),
+            ("moonshot", provider(None, None, vec![key("k", "s2")])),
+        ]);
+        assert_ne!(providers_fingerprint(&a), providers_fingerprint(&d));
+    }
 }
 
 #[cfg(test)]

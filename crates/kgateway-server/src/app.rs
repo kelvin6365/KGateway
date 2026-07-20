@@ -101,6 +101,9 @@ pub struct AppState {
     pub otel_providers: OtelProviders,
     /// Semantic-cache vector store (persistent pgvector or in-memory). Stable across reloads.
     pub vector_store: Arc<dyn VectorStore>,
+    /// Cached aggregated `/v1/models` response (TTL + provider-set fingerprint), so
+    /// repeat listings don't re-fan-out to every upstream.
+    pub models_cache: tokio::sync::Mutex<Option<crate::handlers::ModelsCache>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -310,6 +313,7 @@ pub async fn build_state(config: Config, config_path: String) -> SharedState {
         otel_observer,
         otel_providers,
         vector_store,
+        models_cache: tokio::sync::Mutex::new(None),
     })
 }
 
@@ -679,6 +683,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/health", get(handlers::health))
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/messages", post(crate::anthropic_ingress::messages))
+        .route("/v1/models", get(handlers::list_models))
         .route("/v1/embeddings", post(handlers::embeddings))
         .route("/v1/images/generations", post(handlers::images_generations))
         .route("/v1/audio/speech", post(handlers::audio_speech))

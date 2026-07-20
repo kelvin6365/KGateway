@@ -192,7 +192,7 @@ fn default_cache_threshold() -> f32 {
     0.95
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VirtualKeyConfig {
     pub id: String,
     #[serde(default)]
