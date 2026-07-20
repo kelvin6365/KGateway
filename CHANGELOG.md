@@ -8,6 +8,57 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **`/v1/models` caching + strict-mode gating.** The aggregated listing is now cached for 5
+  minutes behind a **provider-set fingerprint** (provider names, kinds, base URLs, key *ids* —
+  never key values), so config edits / SIGHUP reloads invalidate it immediately rather than
+  serving stale inventory. **Behavior change:** when `virtual_keys` are configured (strict
+  mode), `GET /v1/models` now requires a known virtual key — it was previously the only
+  anonymous data-plane route, and it exposes provider + model inventory.
+
+- **Playground model picker from the live listing.** The dashboard Playground's model
+  suggestions now merge the aggregated `/v1/models` inventory (new `getModels()` in
+  `ui/lib/api.ts`) with configured providers and recent-traffic pairs. The listing needs no
+  admin token, so the picker is useful for non-admin users too.
+
+### Fixed
+
+- **Anthropic streamed tool-calls now covered by tests.** The connector's
+  `content_block_start` → tool id/name and `input_json_delta` → argument-fragment mapping
+  existed since M21 but was untested and documented as deferred. Added a reassembly test
+  (fragmented JSON args + interleaved text block) and verified live end-to-end through the
+  gateway against GLM-5.2; the roadmap's deferred note now correctly lists only
+  Gemini/Bedrock/Cohere.
+
+- **Moonshot (Kimi) + MiniMax as known OpenAI-compatible providers.** `moonshot`
+  (`https://api.moonshot.ai/v1`; override base_url for the China platform) and `minimax`
+  (`https://api.minimax.io/v1`) join `openai_compat::KNOWN` — keys-only config. Both vendors
+  also expose Anthropic-compatible endpoints (`…/anthropic`) usable via `kind: "anthropic"`
+  for Claude Code / OMP / Pi. **Prepared pending real keys**: official docs cross-checked and
+  live keyless probes confirm both wires + list-models endpoints exist (401-gated); gateway
+  routing, scrubbed error mapping, and `/v1/models` graceful skip verified. A new
+  **[verification-status table](docs/03-providers.md#verification-status)** in the providers
+  doc tracks which providers are fully live-tested vs prepared/unit-tested-only.
+
+- **Aggregated model listing (`GET /v1/models`).** OpenAI-compatible endpoint that fans out to
+  every configured provider's official list-models API concurrently (OpenAI-compat
+  `GET {base}/models` with Bearer auth; Anthropic `GET {base}/v1/models` with `x-api-key`) and
+  returns the union with `provider/model`-prefixed ids — directly routable back through the
+  gateway. Best-effort: providers that error, have no listable endpoint (bedrock / azure /
+  gemini / cohere), or whose `${ENV}` key is unset are skipped, each fetch bounded by a 10s
+  timeout. Verified live against z.ai's Anthropic-compat and OpenAI-compat model-list APIs.
+
+- **z.ai GLM as known OpenAI-compatible providers.** `zai` (pay-as-you-go,
+  `https://api.z.ai/api/paas/v4`) and `zai-coding` (GLM Coding Plan,
+  `https://api.z.ai/api/coding/paas/v4`) join `openai_compat::KNOWN` — configure with just keys,
+  no `base_url` needed. The Coding Plan's Anthropic-compatible endpoint remains available via
+  `kind: "anthropic"` (see docs 08 §3b). Explicit `kind` still wins over name inference, so
+  existing `"zai": { "kind": "anthropic", ... }` configs are unaffected.
+
+- **Pi CLI setup guide (docs 08 §3d).** Companion to the Claude Code (§3b) and OMP CLI (§3c)
+  guides: register KGateway in `~/.pi/agent/models.json` with `api: "anthropic-messages"` and
+  `provider/model`-prefixed ids. All three CLIs verified end-to-end against the GLM Coding Plan
+  through the gateway.
+
 - **Unbounded content capture (`max_body_bytes: 0`).** `content_logging.max_body_bytes` now
   treats `0` as "no cap": request/response bodies are captured **in full** (no `…[truncated]`
   marker), for both unary and streamed responses. The default stays 16 KiB. **Behavior change

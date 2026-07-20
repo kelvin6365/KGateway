@@ -280,7 +280,64 @@ Function-/tool-calling now works over SSE (audit finding **L**).
 - [x] **Capture wiring** — the streaming content-capture guard reassembles tool calls so a tool-call response (no text deltas) is recorded in the audit log as the assembled call.
 - [x] Tests: wire round-trip, single + parallel accumulation, plain-content no-op, OpenAI SSE forwarding, and end-to-end capture of an assembled streamed tool call. `cargo test/clippy/fmt` green.
 
-**Deferred:** native tool-call streaming for the Anthropic/Gemini/Bedrock/Cohere adapters (their non-OpenAI SSE event shapes need per-adapter mapping); `post_llm` over accumulated streams.
+**Deferred:** native tool-call streaming for the Gemini/Bedrock/Cohere adapters (their non-OpenAI SSE event shapes need per-adapter mapping); `post_llm` over accumulated streams. *(The **Anthropic** adapter shipped its mapping — `content_block_start` → id/name, `input_json_delta` → argument fragments — verified in M24.)*
+
+---
+
+## M22 — Aggregated model listing + z.ai GLM + coding-CLI verification ✅ DONE
+
+- [x] **`GET /v1/models`** — OpenAI-compatible aggregated model list. Fans out concurrently to
+  every configured provider's official list-models API (OpenAI-compat `GET {base}/models`,
+  Anthropic `GET {base}/v1/models`) and returns the union with routable `provider/model` ids.
+  Best-effort: erroring / unlistable (bedrock, azure, gemini, cohere) / keyless providers are
+  skipped; 10s per-fetch timeout. New `kgateway-providers::model_listing` module (fetchers +
+  parsers), `model_list_target` wire/base inference mirroring `build_engine`.
+- [x] **z.ai GLM in `openai_compat::KNOWN`** — `zai` (pay-as-you-go, `/api/paas/v4`) and
+  `zai-coding` (GLM Coding Plan, `/api/coding/paas/v4`); the Coding Plan's Anthropic wire stays
+  available via `kind: "anthropic"`. Explicit `kind` still beats name inference.
+- [x] **Coding-CLI verification** — Claude Code, OMP CLI, and Pi CLI each ran end-to-end through
+  the gateway against the live GLM Coding Plan (`zai/glm-5.2`, streaming + tools), requests
+  confirmed in the audit log. Pi CLI setup documented in docs 08 §3d.
+- [x] Tests: list-body parsers, wire-inference table, wiremock e2e (aggregation + failure
+  skipping). `cargo test/clippy/fmt` green (190 tests).
+
+---
+
+## M23 — Provider expansion: Moonshot (Kimi) + MiniMax 🟡 PREPARED (pending real keys)
+
+- [x] `moonshot` (`https://api.moonshot.ai/v1`) and `minimax` (`https://api.minimax.io/v1`)
+  added to `openai_compat::KNOWN` + unit tests + `config.example.json` entries
+  (`${MOONSHOT_API_KEY}` / `${MINIMAX_API_KEY}`).
+- [x] Official docs cross-checked (base URLs, Bearer auth, model families: kimi-k3 /
+  kimi-k2.x / moonshot-v1-\*; MiniMax-M2 → M3). Both vendors' Anthropic-compatible
+  `…/anthropic` endpoints and `GET /models` list endpoints probe-confirmed live (401-gated).
+- [x] Keyless gateway verification: providers register by bare name, requests reach the real
+  upstreams, upstream auth errors come back scrubbed (`upstream provider error`, HTTP 401),
+  `/v1/models` skips them gracefully.
+- [x] **Verification-status table** added to [03-providers.md](./03-providers.md#verification-status)
+  marking live-tested vs prepared vs unit-tested-only providers.
+- [ ] **Pending:** live chat/stream/tool verification once real keys are available — then flip
+  the table rows to ✅.
+
+---
+
+## M24 — Model-list caching, picker, vkey hardening ✅ DONE
+
+- [x] **`/v1/models` TTL cache** (5 min) keyed by a **provider-set fingerprint** (names, kinds,
+  base URLs, key *ids* — never key values), so a config change or SIGHUP reload invalidates it
+  immediately instead of serving stale inventory for the rest of the window.
+- [x] **`/v1/models` is vkey-gated in strict mode** — it exposes provider + model inventory, so
+  it now requires a known virtual key whenever `virtual_keys` are configured (previously the
+  only anonymous data-plane route).
+- [x] **Playground model picker** fed by the aggregated listing (`getModels()` in `ui/lib/api.ts`),
+  merged with configured providers + recent-traffic pairs. No admin token needed for the
+  listing source, so the picker is populated even for non-admin dashboard users.
+- [x] **Anthropic streamed tool-calls verified** — the adapter's `content_block_start` /
+  `input_json_delta` → `ToolCallDelta` mapping (present since M21 but untested) now has a
+  reassembly test, and was confirmed live end-to-end through the gateway against GLM-5.2.
+- [x] Governance audit: strict mode confirmed live on **both** ingresses
+  (`/v1/chat/completions` and `/v1/messages`) — anonymous and wrong-key both `401`, hot-reloaded
+  via SIGHUP with no restart.
 
 ---
 

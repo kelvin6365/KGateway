@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 ## What this is
 
-**KGateway** is a high-performance, OpenAI-compatible **AI/LLM gateway**: one API in front of 21
+**KGateway** is a high-performance, OpenAI-compatible **AI/LLM gateway**: one API in front of 25
 providers, with failover, load balancing, a two-tier semantic cache, governance (virtual keys /
 budgets / rate limits), reversible PII redaction + RBAC, Prometheus + OTLP observability, agentic
 MCP tool-calling, and a Next.js dashboard. Backend is a Rust Cargo workspace; the UI is Next.js +
@@ -53,7 +53,7 @@ Dependency direction: `server → plugins/providers/store → core`. Nothing dep
 | Crate | Role |
 |---|---|
 | `kgateway-core` | The engine. Schemas, `Provider`/`LlmPlugin`/`RequestObserver` traits, routing + failover, streaming, plugin pipeline. **No HTTP dependency — embeddable.** |
-| `kgateway-providers` | Connectors: OpenAI, Anthropic, Cohere, Bedrock, Gemini, Azure + the `openai_compat` factory (15 OpenAI-wire-compatible vendors). |
+| `kgateway-providers` | Connectors: OpenAI, Anthropic, Cohere, Bedrock, Gemini, Azure + the `openai_compat` factory (19 OpenAI-wire-compatible vendors, incl. z.ai GLM, Moonshot, MiniMax). |
 | `kgateway-plugins` | Built-in plugins/observers: `logging`, `governance`, `semantic_cache`, `redaction`, `pricing`. |
 | `kgateway-store` | Persistence behind traits: `LogStore`, `VectorStore`, `GovernanceStore` — each with in-memory + SQLite/Postgres impls (sqlx). |
 | `kgateway-server` | axum HTTP gateway + control plane (the binary). `app.rs` wires config → engine; `handlers.rs` is the HTTP surface. |

@@ -46,8 +46,9 @@ Note: the JSON is order-independent; the table above orders fields for readabili
 
 ## `ProviderConfig`
 
-One entry per upstream. The map key (e.g. `"openai"`, `"anthropic"`, `"groq"`, or any custom
-name) is what clients use as the `provider/` prefix in the `model` field.
+One entry per upstream. The map key (e.g. `"openai"`, `"anthropic"`, `"groq"`, `"zai-coding"`,
+or any custom name) is what clients use as the `provider/` prefix in the `model` field. Known
+OpenAI-compatible names (see [03-providers.md](./03-providers.md)) need no `base_url` — just keys.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

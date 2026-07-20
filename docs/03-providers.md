@@ -1,6 +1,25 @@
 # 03 — Providers (connectors)
 
-> **Implemented (16 connectors):** OpenAI, Anthropic, Cohere (native); Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Ollama, Mistral, Nebius, HuggingFace, vLLM, SGLang (OpenAI-compatible via `openai_compat`); **Bedrock** (Converse + SigV4), **Google Gemini** (native), **Azure OpenAI** (deployment routing). Anthropic-compatible custom providers (e.g. **z.ai GLM Coding Plan**) via `kind: "anthropic"`. Register any of the wire-format-specific ones under a custom name with `kind: "openai" | "anthropic" | "bedrock" | "gemini" | "azure"`.
+> **Implemented (20 connectors):** OpenAI, Anthropic, Cohere (native); Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Ollama, Mistral, Nebius, HuggingFace, z.ai GLM (`zai` pay-as-you-go + `zai-coding` Coding Plan), Moonshot (Kimi), MiniMax, vLLM, SGLang (OpenAI-compatible via `openai_compat`); **Bedrock** (Converse + SigV4), **Google Gemini** (native), **Azure OpenAI** (deployment routing). Anthropic-compatible custom providers (e.g. **z.ai GLM Coding Plan**, Moonshot `/anthropic`, MiniMax `/anthropic`) via `kind: "anthropic"`. Register any of the wire-format-specific ones under a custom name with `kind: "openai" | "anthropic" | "bedrock" | "gemini" | "azure"`. See [Verification status](#verification-status) for what has been exercised against live upstreams.
+
+## Verification status
+
+What each provider has actually been exercised against, beyond the unit/e2e test suite
+(which mocks upstreams with wiremock and always runs in CI). Last live verification:
+**2026-07-20**.
+
+| Provider (route prefix) | Wire(s) | Status |
+|---|---|---|
+| **z.ai GLM Coding Plan** — `zai` (`kind: "anthropic"`), `zai-coding` | Anthropic + OpenAI-compat | ✅ **Fully tested live** — unary + streaming + tool use through the gateway; **Claude Code, OMP CLI, and Pi CLI** end-to-end; `/v1/models` aggregation against both official list APIs |
+| **Moonshot (Kimi)** — `moonshot` | OpenAI-compat (+ Anthropic at `/anthropic`) | 🟡 **Prepared — pending a real key.** Keyless verification done: official docs cross-checked (base `https://api.moonshot.ai/v1`, Bearer auth, kimi-k3 / kimi-k2.x / moonshot-v1-\* models); live 401 probes confirm both wires and `GET /v1/models` exist; gateway routing, scrubbed error mapping, and `/v1/models` graceful skip verified |
+| **MiniMax** — `minimax` | OpenAI-compat (+ Anthropic at `/anthropic`) | 🟡 **Prepared — pending a real key.** Same keyless verification; official docs confirm both wires (`https://api.minimax.io/v1`, `/anthropic`) and models MiniMax-M2 → MiniMax-M3 |
+| **OpenAI** — `openai` | OpenAI native | 🧪 **Unit-tested (mocked)** — full connector suite (chat, stream, embeddings, images, audio, errors); pending live key |
+| **Anthropic (Claude)** — `anthropic` | Anthropic native | 🧪 **Unit-tested (mocked)** — incl. tools + streaming; the same connector code path is what `zai` runs on, which **is** live-verified; pending live key |
+| Cohere, Bedrock, Gemini, Azure | native | 🧪 Unit-tested (mocked); pending live key |
+| Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, Ollama, vLLM, SGLang | OpenAI-compat | 🧪 Shared OpenAI connector (live-verified via `zai-coding`); per-vendor base URLs unit-tested; pending live key |
+
+To promote a 🟡/🧪 provider to ✅: export its `${ENV}` key, send one unary + one streamed
+chat through the gateway, and hit `/v1/models` — then update this table.
 
 ## The core lesson
 
@@ -56,6 +75,9 @@ This makes ~9 connectors nearly free once OpenAI works.
 | **vLLM** | OpenAI-compat | none/Bearer | self-hosted | M7 |
 | **SGLang** | OpenAI-compat | none/Bearer | self-hosted | M7 |
 | **Parasail** | OpenAI-compat | Bearer | | M7 |
+| **z.ai GLM** | OpenAI-compat | Bearer | `zai` = pay-as-you-go (`/api/paas/v4`); `zai-coding` = Coding Plan (`/api/coding/paas/v4`); the Coding Plan is also Anthropic-compatible via `kind: "anthropic"` + `https://api.z.ai/api/anthropic` | M22 |
+| **Moonshot (Kimi)** | OpenAI-compat | Bearer | `https://api.moonshot.ai/v1` (intl; override base_url with `api.moonshot.cn` for China); also Anthropic-compatible via `kind: "anthropic"` + `https://api.moonshot.ai/anthropic` | M23 |
+| **MiniMax** | OpenAI-compat | Bearer | `https://api.minimax.io/v1`; also Anthropic-compatible via `kind: "anthropic"` + `https://api.minimax.io/anthropic` | M23 |
 | **ElevenLabs** | ElevenLabs native | `xi-api-key` | audio (speech) only | M7 |
 | **Bedrock Mantle** | Bedrock variant | SigV4 | Bedrock-family variant | M7 |
 

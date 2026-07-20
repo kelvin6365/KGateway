@@ -32,7 +32,7 @@ KGateway implements a proven gateway architecture in **Rust** for:
 
 | Doc | What it covers |
 |---|---|
-| [08-getting-started.md](./08-getting-started.md) | **Start here** — run the gateway, first request, dashboard, Docker/Helm |
+| [08-getting-started.md](./08-getting-started.md) | **Start here** — run the gateway, first request, coding-CLI setup (Claude Code §3b, OMP §3c, Pi §3d), dashboard, Docker/Helm |
 | [01-architecture.md](./01-architecture.md) | Crate layout, request flow, the core traits |
 | [02-roadmap.md](./02-roadmap.md) | Phased milestones M0–M9 (all done), deliverables, follow-ons |
 | [03-providers.md](./03-providers.md) | Connectors, the capability-trait strategy, port order |

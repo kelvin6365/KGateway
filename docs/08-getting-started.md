@@ -78,6 +78,14 @@ curl -s localhost:8080/v1/rerank -H 'content-type: application/json' \
 # image generation
 curl -s localhost:8080/v1/images/generations -H 'content-type: application/json' \
   -d '{"model":"openai/dall-e-3","prompt":"a red bicycle"}'
+
+# aggregated model list — fans out to every configured provider's official
+# list-models API (OpenAI-compat GET {base}/models, Anthropic GET {base}/v1/models)
+# and returns the union with routable "provider/model" ids. Best-effort: a
+# provider that errors, has no listable endpoint (bedrock/azure/gemini), or has
+# an unset ${ENV} key is skipped. Cached 5 min, invalidated when the provider set
+# changes. Requires a virtual key when governance is on (strict mode).
+curl -s localhost:8080/v1/models
 ```
 
 ## 3b. Use with Claude Code (Anthropic ingress)
@@ -123,6 +131,12 @@ logging, failover, and caching all apply. Streaming and tool use are fully trans
    The `provider/model` prefix picks the route (`zai/glm-4.6`, `openai/gpt-4o`, …). Your real
    upstream key lives in KGateway's config — Claude Code only sends the dummy/virtual token. Watch
    requests flow in the dashboard **Logs** page.
+
+   The same pattern works for other Anthropic-compatible vendors — e.g. Moonshot
+   (`"kind": "anthropic"`, `base_url: "https://api.moonshot.ai/anthropic"`, models `kimi-k3`, …)
+   or MiniMax (`base_url: "https://api.minimax.io/anthropic"`, models `MiniMax-M3`, …). Their
+   OpenAI-compatible sides are built in as `moonshot` / `minimax` (keys-only config). See the
+   [verification-status table](./03-providers.md#verification-status) for what's live-tested.
 
    **Two traps:**
 
@@ -217,6 +231,45 @@ format and KGateway handles upstream routing, governance, logging, and caching.
 - **`disableStrictTools: true`** may be needed for some third-party Anthropic-compatible endpoints
   that reject the strict tool-schema field — add it to the provider block if you see tool-schema
   errors.
+
+## 3d. Use with Pi CLI (custom provider)
+
+The **Pi CLI** (`npm install -g @mariozechner/pi-coding-agent`) works the same way as the OMP CLI
+— it speaks `anthropic-messages` to KGateway's `/v1/messages` ingress. Custom providers live in
+`~/.pi/agent/models.json` (JSON, not YAML):
+
+```json
+{
+  "providers": {
+    "kgateway": {
+      "baseUrl": "http://localhost:8080",
+      "api": "anthropic-messages",
+      "apiKey": "test",
+      "models": [
+        {
+          "id": "zai/glm-5.2",
+          "name": "zai/glm-5.2",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}
+```
+
+Then run it with the provider + prefixed model:
+
+```bash
+pi --provider kgateway --model "zai/glm-5.2" "hello"
+```
+
+The same traps as §3c apply: `baseUrl` is the bare origin (Pi appends `/v1/messages`), and
+`models[].id` **must** carry the `provider/` prefix or KGateway routes to the default `openai`
+provider. `apiKey` is required by Pi's schema — any placeholder works unless KGateway governance
+is enabled, in which case set a virtual key id.
 
 ## 4. Beyond the basics (optional)
 

@@ -5,7 +5,7 @@ A high-performance, open-source **AI/LLM gateway** built with Rust + Next.js.
 One OpenAI-compatible API in front of every major LLM provider — with failover, load
 balancing, semantic caching, governance, redaction, MCP tool-calling, and full observability.
 
-> **Status:** production-capable and continuously verified. **21 providers**, multimodal
+> **Status:** production-capable and continuously verified. **25 providers**, multimodal
 > (chat / embeddings / images / audio / rerank), resilient routing (failover + weighted key
 > selection + per-provider isolation) on **both** unary and streaming paths, a plugin pipeline,
 > governance with **shared cross-replica counters**, SQLite **and** Postgres persistence, a
@@ -15,7 +15,7 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
 
 ## What you can do
 
-- **Talk to any provider through one API.** Point any OpenAI SDK at KGateway and route to 21
+- **Talk to any provider through one API.** Point any OpenAI SDK at KGateway and route to 25
   providers by a `"provider/model"` string — no per-vendor client code.
 - **Never drop a request.** Provider failover, weighted API-key selection, and key-level retry
   with exponential backoff + jitter — applied to **streaming** responses too (first-chunk peek
@@ -37,8 +37,8 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
 
 | Area | Capabilities |
 |---|---|
-| **API** | OpenAI-compatible `/v1/chat/completions` (JSON + SSE), `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`. **Anthropic-compatible `/v1/messages`** ingress too (streaming + tool use) — point **Claude Code** or the Anthropic SDKs at the gateway. Full request-param fidelity (`seed`, `response_format`, penalties, tool-choice, …) plus an `extra` passthrough so no client field is dropped. |
-| **Providers (21)** | **Native:** OpenAI, Anthropic, Cohere, Amazon Bedrock, Google Gemini, Azure OpenAI. **OpenAI-compatible:** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, Ollama, vLLM, SGLang. |
+| **API** | OpenAI-compatible `/v1/chat/completions` (JSON + SSE), `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, and an aggregated `/v1/models` (fans out to every configured provider's official list-models API, returns routable `provider/model` ids). **Anthropic-compatible `/v1/messages`** ingress too (streaming + tool use) — point **Claude Code**, the **OMP CLI**, the **Pi CLI**, or the Anthropic SDKs at the gateway. Full request-param fidelity (`seed`, `response_format`, penalties, tool-choice, …) plus an `extra` passthrough so no client field is dropped. |
+| **Providers (25)** | **Native:** OpenAI, Anthropic, Cohere, Amazon Bedrock, Google Gemini, Azure OpenAI. **OpenAI-compatible:** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, z.ai GLM (`zai` pay-as-you-go + `zai-coding` Coding Plan), Moonshot (Kimi), MiniMax, Ollama, vLLM, SGLang. See the [verification-status table](docs/03-providers.md#verification-status) for which are live-tested vs prepared. |
 | **Routing** | Primary + `fallbacks[]` provider failover, weighted key selection, per-key retry with backoff + jitter, per-provider `Semaphore` concurrency isolation, dead-key vs used-key rotation. Works on unary **and** streaming. |
 | **Governance** | Virtual keys: model allow/deny-lists, request rate limits, token budgets, per-period USD cost budgets. Counters behind a `GovernanceStore` — in-process by default, **shared Postgres** for horizontal scaling. |
 | **Caching** | Two-tier semantic cache (exact-hash tier + embedding similarity), params/model-scoped. In-memory or persistent **pgvector** (survives restart, shared across replicas). |
