@@ -359,9 +359,10 @@ number cannot.
   SSE live tail all strip it).
 - [x] **API** — `GET /api/logs/{id}` returns spans as a real JSON array rather than
   JSON-inside-a-string; a corrupt trace is dropped rather than breaking the read.
-- [x] **Dashboard** — `TraceWaterfall` in the log detail drawer, built on the existing
-  `RankingsTable` bar idiom and theme tokens (no new palette, no charting dependency) so it
-  reads natively at the drawer's ~448px width.
+- [x] **Dashboard** — `TraceWaterfall` in a full-screen request dialog whose open state lives
+  in the URL (`/logs?request=<id>`), so a trace is linkable and the browser back button
+  closes it. Three columns (stage | timeline | duration) over a shared ruler, built from the
+  existing bar idiom and theme tokens — no new palette, no charting dependency.
 - [x] Tests: failover records one span per attempt with its status; a cache short-circuit
   records a hit and **no** upstream attempt; a streamed request's trace survives into its
   deferred audit record; spans round-trip on detail but are stripped from lists; the API

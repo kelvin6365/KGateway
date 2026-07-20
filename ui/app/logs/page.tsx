@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, Copy, Radio } from "lucide-react";
 import {
@@ -44,7 +45,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/baroque/empty-state";
@@ -283,7 +290,7 @@ function SortableHeader({ label, column, sortBy, order, disabled, onSort }: Sort
   );
 }
 
-export default function LogsPage() {
+function LogsPageContent() {
   // --- admin token ---
   const [adminTok, setAdminTok] = useState("");
   const [showAdmin, setShowAdmin] = useState(false);
@@ -418,7 +425,32 @@ export default function LogsPage() {
 
   const [selectedLog, setSelectedLog] = useState<RequestLog | null>(null);
 
-  // Full record for the open drawer row — fetched via getLog(id) because the list endpoint
+  // The open request lives in the URL (?request=<id>), so a trace can be linked to a
+  // teammate and the browser back button closes the dialog.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const requestParam = searchParams.get("request");
+
+  const openDetail = useCallback(
+    (log: RequestLog) => {
+      setSelectedLog(log);
+      const next = new URLSearchParams(searchParams.toString());
+      next.set("request", log.request_id);
+      router.push(`${pathname}?${next}`, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
+
+  const closeDetail = useCallback(() => {
+    setSelectedLog(null);
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("request");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [pathname, router, searchParams]);
+
+  // Full record for the open dialog row — fetched via getLog(id) because the list endpoint
   // omits request_body/response_body to stay lean. Scalars render immediately from the row
   // (selectedLog); this only supplies the captured content once it resolves.
   const {
@@ -427,11 +459,31 @@ export default function LogsPage() {
     isError: logDetailError,
     error: logDetailErrorObj,
   } = useQuery({
-    queryKey: ["log-detail", selectedLog?.request_id],
-    queryFn: () => getLog(selectedLog!.request_id),
-    enabled: !!selectedLog,
+    queryKey: ["log-detail", requestParam],
+    queryFn: () => getLog(requestParam!),
+    enabled: !!requestParam,
     retry: false,
   });
+
+  // Deep link / reload: adopt the detail record as the selection when the URL names a
+  // request the list hasn't supplied (opened directly, or it has scrolled out of the page).
+  useEffect(() => {
+    if (!requestParam) {
+      setSelectedLog(null);
+    } else if (logDetail && logDetail.request_id === requestParam) {
+      setSelectedLog((cur) => (cur?.request_id === requestParam ? cur : logDetail));
+    }
+  }, [requestParam, logDetail]);
+
+  // How many upstream tries this request took — the tell that something failed over.
+  // Streamed successes record `stream.ttft` instead of a plain `attempt` span.
+  const attemptCount = useMemo(() => {
+    if (!logDetail?.spans) return null;
+    const n = logDetail.spans.filter(
+      (sp) => sp.name.startsWith("attempt ·") || sp.name.startsWith("stream.ttft"),
+    ).length;
+    return n > 0 ? n : null;
+  }, [logDetail]);
 
   // Small "N dropped" indicator — admin-gated, so only polled once a token is set.
   const { data: droppedCount } = useQuery({
@@ -821,7 +873,7 @@ export default function LogsPage() {
                     <TableRow
                       key={l.request_id}
                       className="cursor-pointer"
-                      onClick={() => setSelectedLog(l)}
+                      onClick={() => openDetail(l)}
                     >
                       <TableCell className="whitespace-nowrap px-4 py-3 text-muted-foreground">
                         {formatTime(l.created_at)}
@@ -916,55 +968,78 @@ export default function LogsPage() {
         </div>
       ))}
 
-      {/* Detail drawer */}
-      <Sheet
+      {/* Detail dialog. Open state lives in the URL (?request=<id>) so a trace is
+          shareable and the browser back button closes it. */}
+      <Dialog
         open={!!selectedLog}
         onOpenChange={(o) => {
-          if (!o) setSelectedLog(null);
+          if (!o) closeDetail();
         }}
       >
-        <SheetContent side="right" className="w-full max-w-md overflow-y-auto sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>Request detail</SheetTitle>
-          </SheetHeader>
+        {/* Radix focuses the first focusable child on open, which lands on a trace
+            row and makes it look pre-selected. Nothing here needs focus on arrival. */}
+        <DialogContent onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Request trace</DialogTitle>
+            {selectedLog && (
+              <span className="font-mono text-[11px] break-all text-muted-foreground">
+                {selectedLog.request_id} · {formatTime(selectedLog.created_at)}
+              </span>
+            )}
+          </DialogHeader>
           {selectedLog && (
-            <div className="flex flex-col gap-4 px-4 pb-6">
-              {selectedLog.error_message && (
-                <div className="rounded-md border border-error px-3 py-2 text-sm text-error">
-                  {selectedLog.error_message}
-                </div>
-              )}
-
-              <dl className="flex flex-col gap-3 text-sm">
+            <DialogBody>
+              <div className="mx-auto w-full max-w-[1400px]">
+              {/* Summary strip: the facts you check before reading a single bar. */}
+              <dl className="grid grid-cols-2 border-b bg-card sm:grid-cols-4">
                 {[
-                  ["Request ID", selectedLog.request_id],
-                  ["Created at", formatTime(selectedLog.created_at)],
-                  ["Virtual key", selectedLog.virtual_key ?? "—"],
-                  ["Provider", selectedLog.provider],
-                  ["Model", selectedLog.model],
-                  ["Status", String(selectedLog.status)],
-                  ["Prompt tokens", selectedLog.prompt_tokens.toLocaleString()],
-                  ["Completion tokens", selectedLog.completion_tokens.toLocaleString()],
-                  ["Latency", `${selectedLog.latency_ms.toLocaleString()} ms`],
+                  ["Route", `${selectedLog.provider}/${selectedLog.model}`],
+                  ["Status", String(selectedLog.status), statusColor(selectedLog.status)],
+                  ["Total latency", `${selectedLog.latency_ms.toLocaleString()} ms`],
+                  ["Attempts", attemptCount === null ? "—" : String(attemptCount),
+                    attemptCount !== null && attemptCount > 1 ? "var(--warning)" : undefined],
+                  ["Tokens", `${selectedLog.prompt_tokens.toLocaleString()} → ${selectedLog.completion_tokens.toLocaleString()}`],
                   ["Cost", formatCost(selectedLog.cost)],
-                  ["Stream", selectedLog.stream ? "yes" : "no"],
-                  ["Cache hit", selectedLog.cache_hit ? "yes" : "no"],
+                  ["Streamed", selectedLog.stream ? "yes" : "no"],
+                  ["Served from cache", selectedLog.cache_hit ? "yes" : "no",
+                    selectedLog.cache_hit ? "var(--success)" : undefined],
+                  ["Virtual key", selectedLog.virtual_key ?? "—"],
                   ["Stop reason", selectedLog.stop_reason ?? "—"],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-4 border-b pb-2">
-                    <dt className="text-muted-foreground">{label}</dt>
-                    <dd className="text-right font-mono text-xs">{value}</dd>
+                ].map(([label, value, color]) => (
+                  <div
+                    key={label}
+                    className="flex flex-col gap-0.5 border-t border-r px-4 py-2.5"
+                  >
+                    <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {label}
+                    </dt>
+                    <dd
+                      className="truncate font-mono text-xs tabular-nums"
+                      title={value as string}
+                      style={color ? { color: color as string } : undefined}
+                    >
+                      {value}
+                    </dd>
                   </div>
                 ))}
               </dl>
 
-              {logDetail?.spans && logDetail.spans.length > 0 && (
-                <div className="border-t pt-4">
-                  <TraceWaterfall spans={logDetail.spans} />
-                </div>
-              )}
+              <div className="flex flex-col gap-4 px-5 py-4">
+                {selectedLog.error_message && (
+                  <div className="rounded-md border border-error px-3 py-2 text-sm text-error">
+                    {selectedLog.error_message}
+                  </div>
+                )}
 
-              <div className="flex flex-col gap-4 border-t pt-4">
+                {logDetailLoading && !logDetail && (
+                  <Skeleton className="h-28 w-full rounded-md" />
+                )}
+
+                {logDetail?.spans && logDetail.spans.length > 0 && (
+                  <TraceWaterfall spans={logDetail.spans} />
+                )}
+
+                <div className="flex flex-col gap-4 border-t pt-4">
                 {(logDetail?.redacted ?? selectedLog.redacted) && (
                   <div
                     className={cn(
@@ -1024,11 +1099,23 @@ export default function LogsPage() {
                   }
                   streamHint={selectedLog.stream}
                 />
+                </div>
               </div>
-            </div>
+              </div>
+            </DialogBody>
           )}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+// `useSearchParams` (which drives the detail dialog's ?request=<id>) opts the page into
+// client-side rendering, so Next requires a Suspense boundary around it.
+export default function LogsPage() {
+  return (
+    <Suspense fallback={<Skeleton className="h-96 w-full rounded-xl" />}>
+      <LogsPageContent />
+    </Suspense>
   );
 }

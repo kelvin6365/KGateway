@@ -398,12 +398,13 @@ impl Kgateway {
         for o in &self.observers {
             let at = std::time::Instant::now();
             let outcome = o.on_request(ctx, model).await;
-            // Named per observer so a slow governance store is distinguishable from a
-            // slow telemetry exporter on the waterfall.
+            // Named for the hook, not for "checking" — the logging observer admits every
+            // request and checks nothing, so `logging.check` read as nonsense. Named per
+            // observer so a slow governance store is distinguishable from a slow exporter.
             ctx.span_at(
                 at,
                 at.elapsed(),
-                format!("{}.check", o.name()),
+                format!("{}.on_request", o.name()),
                 SpanCategory::Policy,
                 1,
                 outcome.as_ref().err().map(|_| "rejected".to_string()),
@@ -731,22 +732,11 @@ impl Kgateway {
                 Some("Waited for a per-provider concurrency permit.".into()),
             );
         }
-        let at = std::time::Instant::now();
-        let out = entry.provider.chat(ctx, key, req).await;
-        ctx.span_at(
-            at,
-            at.elapsed(),
-            "http.request",
-            if out.is_ok() {
-                SpanCategory::Network
-            } else {
-                SpanCategory::Failed
-            },
-            2,
-            None,
-            None,
-        );
-        out
+        // No child span for the HTTP call itself: it lands within microseconds of its
+        // parent `attempt` span, so the extra row costs a line and says nothing. Nesting
+        // is reserved for children that genuinely differ — the semaphore wait above, and
+        // the TTFT / stream-body split on the streaming path.
+        entry.provider.chat(ctx, key, req).await
     }
 
     /// Resolve a `provider/model` string to its registered entry, a weighted-selected

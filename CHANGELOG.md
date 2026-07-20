@@ -12,9 +12,10 @@ collected under a single `Unreleased` section until the first tagged release.
   trace spans — each observer check, each plugin's `pre_llm` (so a cache hit reads as
   "served here, no upstream call"), **every dispatch attempt including the ones that failed
   before a successful retry**, backoff sleeps, contended concurrency permits,
-  time-to-first-token, and stream-body transfer. The log detail drawer renders them as a
-  waterfall, so a slow request shows *where* the time went instead of one opaque
-  `latency_ms`. New `kgateway_core::trace` (`Span` / `SpanCategory` / `SpanCollector`) plus
+  time-to-first-token, and stream-body transfer. A full-screen request dialog renders them as
+  a waterfall, so a slow request shows *where* the time went instead of one opaque
+  `latency_ms`. The dialog's open state lives in the URL (`/logs?request=<id>`), so a trace
+  is linkable and the browser back button closes it; it replaces the old detail drawer. New `kgateway_core::trace` (`Span` / `SpanCategory` / `SpanCollector`) plus
   `Ctx::timed` / `Ctx::span_at` for instrumenting a stage.
 
   Spans carry **no request content** — only stage names, timings, and outcomes — so unlike
