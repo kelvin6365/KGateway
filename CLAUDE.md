@@ -94,6 +94,12 @@ Dependency direction: `server → plugins/providers/store → core`. Nothing dep
   `KGATEWAY_TEST_PGVECTOR`) and skip when unset — never require a live DB to `cargo test`.
 - **Deterministic time in tests:** use `#[tokio::test(start_paused = true)]` (tokio `test-util`)
   for timeout/backoff tests. Do not rely on wall-clock sleeps.
+- **Trace spans carry no content.** Every request records per-stage spans (`kgateway_core::trace`)
+  that power the dashboard's call waterfall. They are persisted **unconditionally**, unlike
+  captured bodies — which is only safe because they hold stage names, timings, and
+  gateway-authored outcomes, never request content or upstream error text. Never copy
+  `KgError::message` into a span; author your own wording from the error *kind* (see
+  `engine::attempt_failure_detail`). The raw text belongs in the row's `error_message`.
 - **Content capture is opt-in twice:** `content_logging.enabled` covers request + non-streaming
   responses; **streamed** responses also need `content_logging.capture_streaming: true`. Captured
   bodies are admin-only (returned solely by `GET /api/logs/{id}`), never in list/SSE responses.
@@ -123,5 +129,12 @@ Dependency direction: `server → plugins/providers/store → core`. Nothing dep
   `app.rs`, add it to the `/api/status` plugin list.
 - **New store backend:** implement the relevant `*Store` trait in `kgateway-store` with an
   in-memory default + a gated Postgres integration test.
+- **New HTTP endpoint:** register it in `app.rs` **and** add an entry to
+  `kgateway-server::api_catalog::ENDPOINTS`. A drift test parses the `.route(...)` table out of
+  `app.rs` and asserts it matches the catalog both ways, so an undocumented route — or a
+  documented one you later removed — **fails `cargo test`**. The catalog feeds `/openapi.json`,
+  `/llms.txt`, `/llms-full.txt`, `/docs/{slug}.md`, and the dashboard's `/docs` page; nothing
+  else needs touching. Write the entry honestly: the drift test checks the method and path, not
+  whether your described defaults and required-ness match the handler.
 - Update [`CHANGELOG.md`](CHANGELOG.md) and, for milestone-level work,
   [`docs/02-roadmap.md`](docs/02-roadmap.md).

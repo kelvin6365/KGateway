@@ -15,13 +15,15 @@ kgateway/
 │   │       ├── engine.rs      # Kgateway struct: queue, dispatch, fallback
 │   │       ├── router.rs      # provider/model/key selection, load balancing
 │   │       ├── keyselect.rs   # weighted-random key selection
-│   │       ├── context.rs     # request-scoped Ctx
+│   │       ├── context.rs     # request-scoped Ctx (incl. trace span collector)
+│   │       ├── trace.rs       # per-request Span/SpanCategory — the call waterfall
 │   │       └── error.rs       # KgError (structured provider/status error)
 │   ├── kgateway-providers/    # provider implementations
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── openai.rs      # reference implementation
-│   │       ├── openai_compat.rs # wrapper: groq, ollama, openrouter, ...
+│   │       ├── openai_compat.rs # wrapper: groq, ollama, zai, moonshot, minimax, ...
+│   │       ├── model_listing.rs # upstream list-models fetchers (aggregated /v1/models)
 │   │       └── anthropic.rs
 │   ├── kgateway-plugins/      # built-in plugins (logging, telemetry, cache, governance)
 │   ├── kgateway-store/        # persistence: store traits + sqlite/postgres impls
@@ -30,6 +32,8 @@ kgateway/
 │           ├── main.rs
 │           ├── app.rs         # router, middleware/tower layers
 │           ├── handlers/      # /v1/chat/completions, /v1/embeddings, config APIs...
+│           ├── api_catalog.rs # every endpoint documented; drift-tested against app.rs
+│           ├── api_docs.rs    # renders openapi.json / llms.txt / per-endpoint .md
 │           └── integrations/  # SDK-compat: openai, anthropic, ... request adapters
 ├── ui/                        # Next.js dashboard
 ├── docker/                    # Dockerfile(s), compose

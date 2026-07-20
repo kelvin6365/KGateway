@@ -11,7 +11,7 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
 > governance with **shared cross-replica counters**, SQLite **and** Postgres persistence, a
 > two-tier semantic cache, reversible PII redaction + RBAC, Prometheus `/metrics` + OTLP export,
 > agentic MCP tool-calling, and a live Next.js dashboard — at **~3.5 µs** per-request overhead.
-> ~164 tests, green under `clippy -D warnings` + `fmt`. See [`docs/02-roadmap.md`](docs/02-roadmap.md).
+> ~230 tests, green under `clippy -D warnings` + `fmt`. See [`docs/02-roadmap.md`](docs/02-roadmap.md).
 
 ## What you can do
 
@@ -31,7 +31,11 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
   (histograms, time-series, top-N rankings), Prometheus metrics, and OTLP traces + metrics.
 - **Run tools.** Agentic MCP tool-calling: discover → inject → execute → re-prompt.
 - **Operate from a UI.** A Next.js dashboard for playground, logs, analytics, providers, cache,
-  plugins, MCP, and settings.
+  plugins, MCP, API docs, and settings.
+- **Debug a slow call.** Per-request tracing shows every stage on a waterfall — governance, cache,
+  each dispatch attempt including the retries that failed, time-to-first-token, stream transfer.
+- **Hand the API to an agent.** `/openapi.json`, `/llms.txt`, and `/llms-full.txt` straight off
+  the gateway, generated from the route table and pinned to it by a test.
 
 ## What's inside
 
@@ -125,7 +129,7 @@ Full architecture, roadmap, and design rationale live in [`docs/`](docs/). Start
 ## Development
 
 ```bash
-cargo test --workspace          # ~164 unit + integration tests
+cargo test --workspace          # ~230 unit + integration tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```

@@ -20,13 +20,15 @@ The dashboard is built on **Next.js App Router + Tailwind + shadcn/ui**. shadcn 
 | Route | Purpose | Backend APIs | Milestone |
 |---|---|---|---|
 | `/` dashboard | usage, cost, latency, token charts; provider breakdown | `/api/logs/stats`, `/metrics` | M8 |
+| `/playground` | multi-turn chat through the gateway: streaming, per-response latency + tokens, model picker fed by the aggregated listing | `/v1/chat/completions`, `/v1/models` | M8 |
 | `/providers` | configure providers + API keys, weights, model lists | `/api/providers` CRUD | M8 |
-| `/virtual-keys` | virtual key hierarchy, budgets, rate limits, model access | `/api/governance/vkeys` | M8 |
-| `/logs` | live request log, filter by provider/model/vkey, drill into a request | `/api/logs` (+ SSE tail) | M8 |
-| `/cache` | semantic cache stats, hit rate, entries | `/api/cache` | M8 |
-| `/mcp` | MCP servers, discovered tools, allow-lists, auth | `/api/mcp` | M8 |
-| `/plugins` | enable/order plugins, per-plugin config, sequence | `/api/plugins` | M8 |
-| `/settings` | global config, env, export/import config.json | `/api/config` | M8 |
+| `/virtual-keys` | virtual keys: budgets, rate limits, model allow/deny-lists | `/api/config/virtual-keys` (+ `PUT`/`DELETE` by id) | M8 |
+| `/logs` | live request log, filter by provider/model/vkey; a full-screen request dialog (URL-addressable via `?request=<id>`) with the **trace waterfall**, captured bodies, and admin reveal | `/api/logs` (+ SSE tail), `/api/logs/{id}` | M8, M25 |
+| `/cache` | semantic cache settings + hit rate, derived from the log | `/api/status`, `/api/logs/stats` | M8 |
+| `/mcp` | MCP servers and the tools they expose | `/api/mcp/tools` | M8 |
+| `/plugins` | which plugins are active in the pipeline, and why | `/api/status` | M8 |
+| `/docs` | generated API reference: every endpoint grouped by auth tier, cURL/Python/JS samples, links to the Markdown and llms.txt artifacts | `/openapi.json` | M26 |
+| `/settings` | runtime + feature summary, admin token entry | `/api/status`, `/api/whoami` | M8 |
 
 ## Project structure
 
@@ -56,7 +58,8 @@ ui/
 
 The backend (`kgateway-server`) exposes:
 - **Data-plane** (OpenAI-compatible): `/v1/chat/completions`, `/v1/embeddings`, `/v1/audio/*`, `/v1/images/*`, `/v1/rerank`, `/v1/batches`, `/v1/files`, `/v1/models`.
-- **Control-plane** (dashboard): `/api/providers`, `/api/governance/*`, `/api/logs`, `/api/cache`, `/api/mcp`, `/api/plugins`, `/api/config`, `/metrics`, `/health`.
+- **Control-plane** (dashboard): `/api/logs` (+ `/{id}`, `/stream`, `/stats`, `/histogram`, `/timeseries`, `/rankings`, `/filterdata`, `/dropped`), `/api/providers`, `/api/config/providers`, `/api/config/virtual-keys` (+ `PUT`/`DELETE` by name/id), `/api/mcp/tools`, `/api/status`, `/api/whoami`, `/api/logs/{id}/reveal`, `/metrics`.
+- **Docs** (public): `/openapi.json`, `/llms.txt`, `/llms-full.txt`, `/docs/{slug}.md` — the authoritative list, generated from the router; see [16-configuration.md](./16-configuration.md) for `public_url`.
 
 Types are the source of truth in Rust (`schemars`-generated JSON Schema); the UI mirrors them in `ui/lib/types` with matching `zod` schemas. A later task can auto-generate TS types from the OpenAPI/JSON Schema to prevent drift.
 

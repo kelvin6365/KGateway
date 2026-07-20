@@ -55,3 +55,19 @@ jobs:
 ## Definition of Done (milestone)
 
 All gate steps green + review findings resolved + docs/roadmap checkbox ticked + (if API surface changed) `05-frontend.md` API contract updated.
+
+## Docs that can't go stale
+
+Two guards keep the generated documentation honest, and both run in `cargo test`:
+
+- **Route/catalog drift** (`api_catalog::drift_tests`) — parses the `.route(...)` table out of
+  `app.rs` and asserts it matches `ENDPOINTS` in both directions. Adding an endpoint without
+  documenting it, or documenting one that no longer exists, fails the gate.
+- **Renderer consistency** (`api_docs::tests`) — every documented parameter must reach
+  `/openapi.json`; multipart endpoints must not be described as JSON; code samples must follow
+  the configured base URL; Markdown table cells must escape pipes; no example may single-quote a
+  shell variable it expects to expand.
+
+**What they do not check:** whether a *described* default, cap, or required-ness matches the
+handler. `"limit is capped at 200"` is prose, and prose can be wrong — verify it against the
+constant when you touch it.
