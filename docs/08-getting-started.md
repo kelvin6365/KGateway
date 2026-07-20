@@ -324,6 +324,9 @@ curl localhost:8080/api/logs/{id}/reveal     # un-redact bodies (admin / logs:re
 curl localhost:8080/api/providers            # configured providers + capabilities
 curl localhost:8080/api/mcp/tools            # discovered MCP tools
 curl localhost:8080/health                   # liveness
+curl localhost:8080/openapi.json             # OpenAPI 3.1 spec (no token needed)
+curl localhost:8080/llms.txt                 # docs index for AI agents
+curl localhost:8080/llms-full.txt            # the whole reference in one file
 ```
 
 ## 7. Docker

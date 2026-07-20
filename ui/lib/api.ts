@@ -512,6 +512,54 @@ export async function getMcpTools(): Promise<McpTool[]> {
 }
 
 /** GET /api/providers — configured providers + their capabilities. */
+/** Minimal shape of the gateway's OpenAPI document — only what the docs page reads. */
+export interface OpenApiSpec {
+  openapi: string;
+  info: { title: string; version: string; description?: string };
+  tags?: { name: string }[];
+  paths: Record<string, Record<string, OpenApiOperation | undefined>>;
+}
+
+export interface OpenApiOperation {
+  summary?: string;
+  description?: string;
+  operationId?: string;
+  tags?: string[];
+  parameters?: {
+    name: string;
+    in: string;
+    required?: boolean;
+    description?: string;
+    schema?: { type?: string };
+  }[];
+  requestBody?: {
+    content?: Record<
+      string,
+      {
+        schema?: {
+          properties?: Record<string, { type?: string; description?: string }>;
+          required?: string[];
+        };
+      }
+    >;
+  };
+  /** Which credential the endpoint needs — a KGateway extension. */
+  "x-kgateway-auth"?: string;
+  "x-codeSamples"?: { lang: string; source: string }[];
+  /** Catalog order — map keys serialize sorted, so reading order travels separately. */
+  "x-order"?: number;
+}
+
+/**
+ * The gateway's own OpenAPI 3.1 document, generated from its route table. Public — no
+ * token needed, so the reference works before you have one.
+ */
+export async function getOpenApi(): Promise<OpenApiSpec> {
+  const res = await fetch(`${BASE_URL}/openapi.json`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as OpenApiSpec;
+}
+
 /** One entry from the aggregated `GET /v1/models` listing (OpenAI list format). */
 export interface ListedModel {
   id: string; // routable "provider/model"

@@ -684,6 +684,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/messages", post(crate::anthropic_ingress::messages))
         .route("/v1/models", get(handlers::list_models))
+        // Documentation artifacts. Unauthenticated on purpose: they describe the admin
+        // surface but contain no secrets, and an agent pointed at a gateway should be
+        // able to discover its API without a credential.
+        .route("/openapi.json", get(handlers::openapi_json))
+        .route("/llms.txt", get(handlers::llms_txt))
+        .route("/llms-full.txt", get(handlers::llms_full_txt))
+        .route("/docs/{file}", get(handlers::endpoint_markdown))
         .route("/v1/embeddings", post(handlers::embeddings))
         .route("/v1/images/generations", post(handlers::images_generations))
         .route("/v1/audio/speech", post(handlers::audio_speech))

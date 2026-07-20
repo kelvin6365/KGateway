@@ -547,6 +547,84 @@ pub async fn providers(State(state): State<SharedState>) -> Response {
     Json(serde_json::json!({ "providers": summaries })).into_response()
 }
 
+// ---- Documentation artifacts ----
+
+/// The origin clients should call, taken from the request's `Host` so examples target
+/// the reader's own gateway rather than `localhost`.
+fn docs_base_url(headers: &HeaderMap) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:8080");
+    // Behind a TLS-terminating proxy the scheme only survives in this header.
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(
+            if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+                "http"
+            } else {
+                "https"
+            },
+        );
+    format!("{scheme}://{host}")
+}
+
+/// `GET /openapi.json` — the whole API as an OpenAPI 3.1 spec.
+pub async fn openapi_json(headers: HeaderMap) -> Response {
+    Json(crate::api_docs::openapi(&docs_base_url(&headers))).into_response()
+}
+
+/// `GET /llms.txt` — documentation index for AI agents.
+pub async fn llms_txt(headers: HeaderMap) -> Response {
+    text_plain(crate::api_docs::llms_txt(&docs_base_url(&headers)))
+}
+
+/// `GET /llms-full.txt` — every endpoint inlined in one file.
+pub async fn llms_full_txt(headers: HeaderMap) -> Response {
+    text_plain(crate::api_docs::llms_full_txt(&docs_base_url(&headers)))
+}
+
+/// `GET /docs/{slug}.md` — one endpoint as Markdown, what the llms.txt index links to.
+pub async fn endpoint_markdown(headers: HeaderMap, Path(file): Path<String>) -> Response {
+    let slug = file.strip_suffix(".md").unwrap_or(&file);
+    match crate::api_docs::endpoint_by_slug(slug) {
+        Some(e) => markdown(crate::api_docs::endpoint_markdown(
+            e,
+            &docs_base_url(&headers),
+        )),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            markdown(format!(
+                "# Not found\n\nNo endpoint has the slug `{slug}`. See /llms.txt for the index.\n"
+            )),
+        )
+            .into_response(),
+    }
+}
+
+fn text_plain(body: String) -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+fn markdown(body: String) -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
 // ---- Aggregated model listing ----
 
 /// How long an aggregated `/v1/models` response is served from cache before the

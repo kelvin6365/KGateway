@@ -8,6 +8,21 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Generated API reference + agent-readable docs.** A new `api_catalog` module lists every
+  endpoint the gateway serves — method, path, auth tier, parameters, and a runnable example —
+  and four surfaces render from it: **`GET /openapi.json`** (OpenAPI 3.1, so the API also
+  imports into Postman, Insomnia, or a client generator), **`GET /llms.txt`** (an index in the
+  llms.txt convention, linking to per-endpoint Markdown), **`GET /llms-full.txt`** (everything
+  inlined for a single fetch into a model's context), and **`GET /docs/{slug}.md`** (the
+  Markdown twin the index links to). All four are unauthenticated: they describe the admin
+  surface but contain no secrets, and an agent pointed at a gateway should be able to discover
+  its API. The dashboard's new **API Docs** page renders the same spec, with cURL / Python /
+  JavaScript samples, per-endpoint auth chips, and a copy-the-whole-page button.
+
+  **The reference cannot drift.** A test parses the `.route(...)` table out of `app.rs` and
+  asserts it matches the catalog exactly in both directions, so registering an endpoint
+  without documenting it — or documenting one that no longer exists — fails `cargo test`.
+
 - **Per-request call tracing + dashboard waterfall.** Every request now records per-stage
   trace spans — each observer check, each plugin's `pre_llm` (so a cache hit reads as
   "served here, no upstream call"), **every dispatch attempt including the ones that failed

@@ -43,6 +43,7 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
 | **Governance** | Virtual keys: model allow/deny-lists, request rate limits, token budgets, per-period USD cost budgets. Counters behind a `GovernanceStore` — in-process by default, **shared Postgres** for horizontal scaling. |
 | **Caching** | Two-tier semantic cache (exact-hash tier + embedding similarity), params/model-scoped. In-memory or persistent **pgvector** (survives restart, shared across replicas). |
 | **Security** | Reversible AES-256-GCM redaction of captured bodies, RBAC (viewer/operator/admin) with fail-closed tokens, audited reveal. |
+| **Docs** | A generated API reference at `/docs` in the dashboard, plus `/openapi.json`, `/llms.txt`, `/llms-full.txt`, and per-endpoint Markdown straight off the gateway — all rendered from the route table, and pinned to it by a test. |
 | **Observability** | Request audit log (`/api/logs`, filters + pagination + SSE tail), **per-request call tracing** — a stage-by-stage waterfall covering governance, cache, every dispatch attempt (including failed retries), time-to-first-token and stream transfer — analytics endpoints, opt-in request/response content capture (async batch writer), Prometheus `/metrics`, **OTLP** traces + metrics with W3C `traceparent` propagation. |
 | **Plugins** | Capability-segmented pipeline (`pre_request` / `pre_llm` / `post_llm` + request observers) running on every capability. |
 | **MCP** | Agentic tool-calling over in-process + stdio MCP servers. |

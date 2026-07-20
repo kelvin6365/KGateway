@@ -378,6 +378,29 @@ size); emitting these as OTLP child spans so the waterfall and Jaeger/Grafana ag
 
 ---
 
+## M26 — Generated API reference ✅ DONE
+
+**Goal:** one place that tells you every endpoint and how to call it — that can't go stale.
+
+- [x] **`api_catalog`** — one entry per endpoint: method, path, auth tier, summary, parameters,
+  runnable example, sample response. The single source of truth for every doc surface.
+- [x] **Drift test** — parses `.route(...)` out of `app.rs` and asserts it matches the catalog
+  both ways. An undocumented route, or a documented route that no longer exists, fails the
+  gate. This is the whole reason the reference stays true; a hand-kept one is wrong in a month.
+- [x] **Four rendered surfaces:** `/openapi.json` (OpenAPI 3.1), `/llms.txt` (index, following
+  the convention agents are trained on), `/llms-full.txt` (inlined), `/docs/{slug}.md`
+  (per-endpoint Markdown). Unauthenticated — no secrets, and discovery shouldn't need a token.
+- [x] **Dashboard `/docs`** — renders the gateway's own spec: grouped by auth tier, cURL /
+  Python / JavaScript tabs derived from the one stored example, copy-page-as-Markdown.
+- [x] Tests: OpenAPI shape and coverage, two methods on one path, security only where required,
+  llms.txt convention, **every index link resolves to a real endpoint**, Markdown structure,
+  base-URL substitution, size ceiling on llms-full.txt. 225 tests green.
+
+**Deferred:** the interactive "Try it" playground (needs a request builder, auth handling, and
+CORS thought — the existing Playground page already sends real chats, so the gap is small).
+
+---
+
 ## 🎉 M0–M9 complete
 
 KGateway is a working, tested Rust + Next.js LLM gateway: **13 providers**, multimodal (chat/embeddings/images/audio/rerank), failover + load-balancing + per-provider isolation, a capability-segmented plugin pipeline, governance (virtual keys / budgets / rate limits), SQLite **and** Postgres persistence, semantic cache, Prometheus metrics, agentic MCP tool-calling, a live Next.js dashboard, Docker + Helm deployment, and ~2.8 µs per-request overhead — every milestone runtime-verified. Remaining items are explicit follow-ons (transport-heavy connectors: Bedrock/Vertex/Azure; real MCP transport via `rmcp`; OTLP export; live-config write APIs), and the architecture is ready for each.

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BookOpen,
   LayoutDashboard,
   MessageSquare,
   Boxes,
@@ -28,6 +29,7 @@ const NAV = [
   { href: "/cache", label: "Cache", icon: Database },
   { href: "/mcp", label: "MCP", icon: Wrench },
   { href: "/plugins", label: "Plugins", icon: Puzzle },
+  { href: "/docs", label: "API Docs", icon: BookOpen },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
