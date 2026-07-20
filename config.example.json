@@ -31,6 +31,21 @@
       "keys": [
         { "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }
       ]
+    },
+    "zai-coding": {
+      "keys": [
+        { "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }
+      ]
+    },
+    "moonshot": {
+      "keys": [
+        { "id": "default", "value": "${MOONSHOT_API_KEY}", "weight": 1 }
+      ]
+    },
+    "minimax": {
+      "keys": [
+        { "id": "default", "value": "${MINIMAX_API_KEY}", "weight": 1 }
+      ]
     }
   },
   "virtual_keys": [

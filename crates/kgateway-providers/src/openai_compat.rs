@@ -19,6 +19,20 @@ const KNOWN: &[(&str, &str)] = &[
     ("mistral", "https://api.mistral.ai/v1"),
     ("nebius", "https://api.studio.nebius.ai/v1"),
     ("huggingface", "https://router.huggingface.co/v1"),
+    // z.ai (Zhipu GLM). `zai` is the pay-as-you-go API; `zai-coding` is the
+    // subscription GLM Coding Plan's OpenAI-compatible endpoint (same GLM model
+    // ids, metered by the plan). The Coding Plan also speaks Anthropic wire —
+    // for that, configure `"kind": "anthropic"` with base_url
+    // https://api.z.ai/api/anthropic instead.
+    ("zai", "https://api.z.ai/api/paas/v4"),
+    ("zai-coding", "https://api.z.ai/api/coding/paas/v4"),
+    // Moonshot AI (Kimi). International endpoint; override base_url with
+    // https://api.moonshot.cn/v1 for the China platform. Also speaks Anthropic
+    // wire at https://api.moonshot.ai/anthropic (use `kind: "anthropic"`).
+    ("moonshot", "https://api.moonshot.ai/v1"),
+    // MiniMax. Also speaks Anthropic wire at https://api.minimax.io/anthropic
+    // (use `kind: "anthropic"`).
+    ("minimax", "https://api.minimax.io/v1"),
     // Self-hosted OpenAI-compatible servers — override base_url in config.
     ("vllm", "http://localhost:8000/v1"),
     ("sglang", "http://localhost:30000/v1"),
@@ -80,6 +94,22 @@ mod tests {
         assert_eq!(
             default_base_url("ollama"),
             Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            default_base_url("zai"),
+            Some("https://api.z.ai/api/paas/v4")
+        );
+        assert_eq!(
+            default_base_url("zai-coding"),
+            Some("https://api.z.ai/api/coding/paas/v4")
+        );
+        assert_eq!(
+            default_base_url("moonshot"),
+            Some("https://api.moonshot.ai/v1")
+        );
+        assert_eq!(
+            default_base_url("minimax"),
+            Some("https://api.minimax.io/v1")
         );
     }
 

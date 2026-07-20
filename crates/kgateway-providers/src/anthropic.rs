@@ -976,4 +976,49 @@ mod tests {
         let collected: Vec<_> = out.collect().await;
         assert_eq!(collected.len(), 1, "only the pre-stop delta is yielded");
     }
+
+    #[tokio::test]
+    async fn streaming_tool_use_maps_to_tool_call_deltas_and_reassembles() {
+        use kgateway_core::schema::ToolCallAccumulator;
+
+        // A realistic tool-turn: a text preamble block (index 0), then a tool_use
+        // block (index 1) whose JSON arguments arrive in fragments, closed by a
+        // message_delta carrying stop_reason=tool_use.
+        let frames = vec![Ok::<_, reqwest::Error>(Bytes::from(concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m7\",\"model\":\"glm-5.2\",\"usage\":{\"input_tokens\":30,\"output_tokens\":0}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Checking\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_w1\",\"name\":\"get_weather\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"HK\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )))];
+
+        let mut out = sse_to_chunks(stream::iter(frames), "fallback".into());
+        let mut acc = ToolCallAccumulator::new();
+        let mut text = String::new();
+        let mut stop = None;
+        while let Some(item) = out.next().await {
+            let chunk = item.expect("chunk parses");
+            let Some(choice) = chunk.choices.first() else {
+                continue;
+            };
+            if let Some(c) = &choice.delta.content {
+                text.push_str(c);
+            }
+            acc.push(&choice.delta);
+            if let Some(fr) = &choice.finish_reason {
+                stop = Some(fr.clone());
+            }
+        }
+
+        assert_eq!(text, "Checking", "text preamble streams unaffected");
+        assert_eq!(stop.as_deref(), Some("tool_use"));
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1, "fragments reassemble into one call");
+        assert_eq!(calls[0].id, "call_w1");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"city\":\"HK\"}");
+    }
 }

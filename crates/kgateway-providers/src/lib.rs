@@ -9,6 +9,7 @@ pub mod bedrock;
 pub mod cohere;
 pub mod gemini;
 pub(crate) mod http;
+pub mod model_listing;
 pub mod openai;
 pub mod openai_compat;
 
