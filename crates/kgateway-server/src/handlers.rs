@@ -549,77 +549,112 @@ pub async fn providers(State(state): State<SharedState>) -> Response {
 
 // ---- Documentation artifacts ----
 
-/// The origin clients should call, taken from the request's `Host` so examples target
-/// the reader's own gateway rather than `localhost`.
-fn docs_base_url(headers: &HeaderMap) -> String {
+/// The origin clients should call, used as the base URL in every generated artifact.
+///
+/// `config.public_url` wins. Only when it is unset do we fall back to the request's
+/// `Host`, and then only after validating it: these routes are unauthenticated and the
+/// value lands in `openapi.json`'s `servers[]`, every llms.txt link, and every curl
+/// example. A spoofed `Host` behind a cache that doesn't vary on it would otherwise
+/// hand readers a spec pointing at someone else's origin — with their key in the
+/// example. `X-Forwarded-Proto` is likewise honoured only as an exact `http`/`https`.
+fn docs_base_url(state: &SharedState, headers: &HeaderMap) -> String {
+    if let Some(url) = state
+        .config
+        .load()
+        .public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        return url.trim_end_matches('/').to_string();
+    }
+
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
+        .filter(|h| is_plausible_host(h))
         .unwrap_or("localhost:8080");
-    // Behind a TLS-terminating proxy the scheme only survives in this header.
-    let scheme = headers
+    let scheme = match headers
         .get("x-forwarded-proto")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or(
-            if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-                "http"
-            } else {
-                "https"
-            },
-        );
+    {
+        Some("https") => "https",
+        Some("http") => "http",
+        _ if host.starts_with("localhost") || host.starts_with("127.0.0.1") => "http",
+        _ => "https",
+    };
     format!("{scheme}://{host}")
 }
 
+/// A bare `host[:port]` — no scheme, path, credentials, whitespace, or control
+/// characters that could break out of the URL this gets interpolated into.
+fn is_plausible_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+}
+
 /// `GET /openapi.json` — the whole API as an OpenAPI 3.1 spec.
-pub async fn openapi_json(headers: HeaderMap) -> Response {
-    Json(crate::api_docs::openapi(&docs_base_url(&headers))).into_response()
+pub async fn openapi_json(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    Json(crate::api_docs::openapi(&docs_base_url(&state, &headers))).into_response()
 }
 
 /// `GET /llms.txt` — documentation index for AI agents.
-pub async fn llms_txt(headers: HeaderMap) -> Response {
-    text_plain(crate::api_docs::llms_txt(&docs_base_url(&headers)))
+pub async fn llms_txt(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    text_plain(crate::api_docs::llms_txt(&docs_base_url(&state, &headers)))
 }
 
 /// `GET /llms-full.txt` — every endpoint inlined in one file.
-pub async fn llms_full_txt(headers: HeaderMap) -> Response {
-    text_plain(crate::api_docs::llms_full_txt(&docs_base_url(&headers)))
+pub async fn llms_full_txt(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    text_plain(crate::api_docs::llms_full_txt(&docs_base_url(
+        &state, &headers,
+    )))
 }
 
-/// `GET /docs/{slug}.md` — one endpoint as Markdown, what the llms.txt index links to.
-pub async fn endpoint_markdown(headers: HeaderMap, Path(file): Path<String>) -> Response {
+/// `GET /docs/{file}` — one endpoint as Markdown, what the llms.txt index links to.
+pub async fn endpoint_markdown(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(file): Path<String>,
+) -> Response {
     let slug = file.strip_suffix(".md").unwrap_or(&file);
     match crate::api_docs::endpoint_by_slug(slug) {
         Some(e) => markdown(crate::api_docs::endpoint_markdown(
             e,
-            &docs_base_url(&headers),
+            &docs_base_url(&state, &headers),
         )),
+        // Deliberately does NOT echo the requested slug. This is served from the same
+        // origin as the dashboard, and reflecting raw input into a body some client
+        // will render is how a 404 becomes an injection point.
         None => (
             axum::http::StatusCode::NOT_FOUND,
-            markdown(format!(
-                "# Not found\n\nNo endpoint has the slug `{slug}`. See /llms.txt for the index.\n"
-            )),
+            markdown(
+                "# Not found\n\nNo endpoint has that slug. See /llms.txt for the index.\n"
+                    .to_string(),
+            ),
         )
             .into_response(),
     }
 }
 
 fn text_plain(body: String) -> Response {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+    docs_body("text/plain; charset=utf-8", body)
 }
 
 fn markdown(body: String) -> Response {
+    docs_body("text/markdown; charset=utf-8", body)
+}
+
+/// `nosniff` so a browser can't be talked into treating a docs body as HTML and running
+/// it against the dashboard's origin.
+fn docs_body(content_type: &'static str, body: String) -> Response {
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/markdown; charset=utf-8",
-        )],
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
         body,
     )
         .into_response()

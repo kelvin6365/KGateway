@@ -96,11 +96,23 @@ function toOperations(spec: OpenApiSpec | undefined): Operation[] {
 /**
  * Derive Python / JavaScript from the curl sample rather than storing three copies of
  * every example in the catalog — three copies is three chances to drift.
+ *
+ * Returns null when the example can't be faithfully translated (a multipart upload, or
+ * a shell snippet that isn't a single curl). Showing a sample that silently drops the
+ * file or the query string is worse than showing none: the reader copies it, gets a
+ * 400, and blames the API.
  */
-function asLanguage(op: Operation, lang: Lang): string {
+function asLanguage(op: Operation, lang: Lang): string | null {
   if (lang === "curl") return op.curl;
+  // `-F` is multipart; there's no honest one-line requests/fetch equivalent here.
+  if (/\s-F\s/.test(op.curl)) return null;
 
-  const url = `${BASE_URL}${op.path}`;
+  // Take the URL from the example itself so query strings and filled-in path params
+  // survive; rebuilding it from op.path drops `?token=…` and leaves `{id}` literal.
+  const urlMatch = op.curl.match(/https?:\/\/[^\s'"]+/);
+  if (!urlMatch) return null;
+  const url = urlMatch[0].replace("http://localhost:8080", BASE_URL);
+
   const bodyParams = op.params.filter((p) => p.location === "body");
   const bodyMatch = op.curl.match(/-d '([\s\S]*?)'/);
   const body = bodyMatch?.[1]?.trim();
@@ -251,12 +263,18 @@ function EndpointCard({ op }: { op: Operation }) {
                 <ExternalLink size={12} />
                 Markdown
               </a>
-              <CopyButton text={sample} />
+              {sample && <CopyButton text={sample} />}
             </div>
           </div>
-          <pre className="overflow-x-auto rounded-md border bg-background/60 px-3 py-2 font-mono text-xs whitespace-pre">
-            {sample}
-          </pre>
+          {sample ? (
+            <pre className="overflow-x-auto rounded-md border bg-background/60 px-3 py-2 font-mono text-xs whitespace-pre">
+              {sample}
+            </pre>
+          ) : (
+            <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
+              This example is a multipart upload; see the cURL tab, which is exact.
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

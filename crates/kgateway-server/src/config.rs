@@ -39,6 +39,13 @@ pub struct Config {
     /// production deployment should set this explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cors_allow_origins: Option<Vec<String>>,
+    /// Origin this gateway is reached at, e.g. `https://gw.example.com`. Used as the
+    /// base URL in the generated docs (`/openapi.json`, `/llms.txt`, examples). When
+    /// unset the request's `Host` is used, which is fine locally but is attacker-
+    /// controlled — set this in production so a spoofed header can't poison a cached
+    /// spec and point readers' SDKs at another origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     /// Request-log retention, in days. When set (and > 0), a background task periodically
     /// deletes logs older than this. When unset, logs are kept indefinitely (fine for
     /// dev/in-memory; set this for any durable deployment so the table can't grow without
@@ -261,6 +268,7 @@ impl Default for Config {
             mcp: None,
             request_timeout_secs: None,
             cors_allow_origins: None,
+            public_url: None,
             log_retention_days: None,
             content_logging: None,
             api_tokens: Vec::new(),

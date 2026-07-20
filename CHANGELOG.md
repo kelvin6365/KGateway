@@ -23,6 +23,10 @@ collected under a single `Unreleased` section until the first tagged release.
   asserts it matches the catalog exactly in both directions, so registering an endpoint
   without documenting it — or documenting one that no longer exists — fails `cargo test`.
 
+- **`public_url` config.** Sets the origin the generated docs advertise. With it unset the
+  base URL is derived from the request's `Host` (validated as a bare `host[:port]`), which is
+  fine locally but attacker-influenceable — set it in production.
+
 - **Per-request call tracing + dashboard waterfall.** Every request now records per-stage
   trace spans — each observer check, each plugin's `pre_llm` (so a cache hit reads as
   "served here, no upstream call"), **every dispatch attempt including the ones that failed

@@ -62,8 +62,37 @@ pub fn openapi(base_url: &str) -> serde_json::Value {
             })
             .collect();
 
+        // `form` is multipart, not JSON — projecting it as a body property would
+        // describe /v1/audio/transcriptions as taking JSON, which it does not.
+        let form_params: Vec<_> = e.params.iter().filter(|p| p.location == "form").collect();
         let body_params: Vec<_> = e.params.iter().filter(|p| p.location == "body").collect();
-        let request_body = if body_params.is_empty() {
+        let request_body = if !form_params.is_empty() {
+            let mut props = serde_json::Map::new();
+            let mut required: Vec<&str> = Vec::new();
+            for p in &form_params {
+                let ty = if p.ty == "binary" {
+                    "string"
+                } else {
+                    json_type(p.ty)
+                };
+                let mut schema = serde_json::json!({ "type": ty, "description": p.description });
+                if p.ty == "binary" {
+                    schema["format"] = serde_json::json!("binary");
+                }
+                props.insert(p.name.to_string(), schema);
+                if p.required {
+                    required.push(p.name);
+                }
+            }
+            serde_json::json!({
+                "required": true,
+                "content": { "multipart/form-data": { "schema": {
+                    "type": "object",
+                    "properties": props,
+                    "required": required,
+                }}}
+            })
+        } else if body_params.is_empty() {
             serde_json::Value::Null
         } else {
             let mut props = serde_json::Map::new();
@@ -103,7 +132,10 @@ pub fn openapi(base_url: &str) -> serde_json::Value {
             // /v1/chat/completions under /docs/{file}. Carry the catalog's order so
             // readers meet the important endpoints first.
             "x-order": index,
-            "x-codeSamples": [{ "lang": "curl", "source": e.example }],
+            "x-codeSamples": [{
+                "lang": "curl",
+                "source": e.example.replace("http://localhost:8080", base_url),
+            }],
         });
         if !request_body.is_null() {
             op["requestBody"] = request_body;
@@ -166,11 +198,11 @@ pub fn endpoint_markdown(e: &Endpoint, base_url: &str) -> String {
         for p in e.params {
             s.push_str(&format!(
                 "| `{}` | {} | {} | {} | {} |\n",
-                p.name,
+                escape_table_cell(p.name),
                 p.location,
-                p.ty,
+                escape_table_cell(p.ty),
                 if p.required { "yes" } else { "no" },
-                p.description
+                escape_table_cell(p.description)
             ));
         }
         s.push('\n');
@@ -186,6 +218,13 @@ pub fn endpoint_markdown(e: &Endpoint, base_url: &str) -> String {
         s.push_str("\n```\n");
     }
     s
+}
+
+/// Escape a value for a Markdown table cell. Several descriptions enumerate options as
+/// "`asc` | `desc`", and an unescaped pipe ends the cell — silently shifting every
+/// column after it.
+fn escape_table_cell(s: &str) -> String {
+    s.replace('|', "\\|")
 }
 
 /// Look up an endpoint by its slug, for `GET /docs/{slug}.md`.
@@ -331,6 +370,100 @@ mod tests {
             !required.iter().any(|v| v == "stream"),
             "optional fields must not be marked required"
         );
+    }
+
+    #[test]
+    fn every_documented_param_reaches_the_spec() {
+        // The drift test only compares (method, path) pairs, so a whole parameter class
+        // can vanish from the spec while the Markdown still shows it — which is what
+        // happened to the multipart `form` params.
+        let spec = openapi(BASE);
+        for e in ENDPOINTS {
+            if e.params.is_empty() {
+                continue;
+            }
+            let op = &spec["paths"][e.path][e.method.to_lowercase()];
+            for p in e.params {
+                let in_params = op["parameters"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|q| q["name"] == p.name));
+                let in_body = op["requestBody"]["content"]
+                    .as_object()
+                    .is_some_and(|media| {
+                        media
+                            .values()
+                            .any(|m| !m["schema"]["properties"][p.name].is_null())
+                    });
+                assert!(
+                    in_params || in_body,
+                    "{} {} documents `{}` ({}) but it appears nowhere in the spec",
+                    e.method,
+                    e.path,
+                    p.name,
+                    p.location
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_endpoints_declare_multipart_not_json() {
+        let spec = openapi(BASE);
+        let content = &spec["paths"]["/v1/audio/transcriptions"]["post"]["requestBody"]["content"];
+        assert!(
+            content["multipart/form-data"].is_object(),
+            "a file upload must not be described as JSON"
+        );
+        assert!(content["application/json"].is_null());
+        assert_eq!(
+            content["multipart/form-data"]["schema"]["properties"]["file"]["format"],
+            "binary"
+        );
+    }
+
+    #[test]
+    fn code_samples_target_the_callers_host_not_localhost() {
+        // The spec's servers[] was substituted while the samples weren't, so a reader on
+        // a deployed gateway saw curl commands pointing at their own machine.
+        let spec = openapi("https://gw.example.com");
+        let sample = spec["paths"]["/v1/chat/completions"]["post"]["x-codeSamples"][0]["source"]
+            .as_str()
+            .unwrap();
+        assert!(sample.contains("https://gw.example.com/v1/chat/completions"));
+        assert!(!sample.contains("localhost:8080"));
+    }
+
+    #[test]
+    fn table_cells_escape_pipes() {
+        // "`asc` | `desc`" in a description would otherwise end the cell and shift every
+        // column after it.
+        let e = endpoint_by_slug("get-api-logs").unwrap();
+        let md = endpoint_markdown(e, BASE);
+        for line in md.lines().filter(|l| l.starts_with("| `")) {
+            assert_eq!(
+                line.matches(" | ").count() + 2,
+                6,
+                "row has the wrong column count, an unescaped pipe split it: {line}"
+            );
+        }
+        assert!(
+            md.contains(r"\|"),
+            "the enumerated options are escaped, not dropped"
+        );
+    }
+
+    #[test]
+    fn control_plane_examples_expand_the_token_variable() {
+        // Single quotes stop the shell expanding $KG_ADMIN, so the example would
+        // authenticate as the literal string and 401.
+        for e in ENDPOINTS {
+            assert!(
+                !e.example.contains("'authorization: Bearer $"),
+                "{} {} single-quotes the auth header, so the variable never expands",
+                e.method,
+                e.path
+            );
+        }
     }
 
     #[test]

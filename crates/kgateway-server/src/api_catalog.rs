@@ -94,6 +94,58 @@ impl Endpoint {
     }
 }
 
+/// The filter parameters every log/analytics endpoint accepts (see `filter_from_map`).
+/// Declared once so the five readers can't document different subsets of the same thing.
+const F_PROVIDER: Param = Param {
+    name: "provider",
+    location: "query",
+    ty: "string",
+    required: false,
+    description: "Exact provider match.",
+};
+const F_MODEL: Param = Param {
+    name: "model",
+    location: "query",
+    ty: "string",
+    required: false,
+    description: "Exact model match.",
+};
+const F_STATUS: Param = Param {
+    name: "status",
+    location: "query",
+    ty: "integer",
+    required: false,
+    description: "Exact HTTP status.",
+};
+const F_VKEY: Param = Param {
+    name: "virtual_key",
+    location: "query",
+    ty: "string",
+    required: false,
+    description: "Exact virtual-key match.",
+};
+const F_SINCE: Param = Param {
+    name: "since_ms",
+    location: "query",
+    ty: "integer",
+    required: false,
+    description: "Unix ms lower bound on `created_at`.",
+};
+const F_CACHE_HIT: Param = Param {
+    name: "cache_hit",
+    location: "query",
+    ty: "boolean",
+    required: false,
+    description: "Only hits, or only misses.",
+};
+const F_SEARCH: Param = Param {
+    name: "search",
+    location: "query",
+    ty: "string",
+    required: false,
+    description: "Case-insensitive substring over request id / provider / model.",
+};
+
 const MODEL_PARAM: Param = Param {
     name: "model",
     location: "body",
@@ -155,8 +207,8 @@ themselves), and the model needs the `provider/` prefix or it routes to the defa
             MODEL_PARAM,
             Param { name: "messages", location: "body", ty: "array", required: true,
                 description: "Anthropic-shaped turns. `tool_use` / `tool_result` blocks are supported." },
-            Param { name: "max_tokens", location: "body", ty: "integer", required: true,
-                description: "Required by the Anthropic protocol. Defaults to 4096 when routed to a provider that doesn't require it." },
+            Param { name: "max_tokens", location: "body", ty: "integer", required: false,
+                description: "The Anthropic protocol requires it, but this ingress accepts its absence; a provider that needs one is sent 4096." },
             Param { name: "system", location: "body", ty: "string", required: false,
                 description: "Top-level system prompt, per the Anthropic wire format." },
             Param { name: "stream", location: "body", ty: "boolean", required: false,
@@ -364,7 +416,7 @@ are omitted here and fetched per-request from `/api/logs/{id}`.",
             Param { name: "since_ms", location: "query", ty: "integer", required: false, description: "Unix ms lower bound on `created_at`." },
             Param { name: "search", location: "query", ty: "string", required: false, description: "Case-insensitive substring over request id / provider / model." },
         ],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' \\\n  'http://localhost:8080/api/logs?limit=20&status=200'",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  'http://localhost:8080/api/logs?limit=20&status=200'",
         response: "",
     },
     Endpoint {
@@ -377,7 +429,7 @@ are omitted here and fetched per-request from `/api/logs/{id}`.",
 JSON array and carry no request content or upstream error text, only stage names, timings, and \
 gateway-authored outcomes.",
         params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "The request id." }],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' \\\n  http://localhost:8080/api/logs/$REQUEST_ID",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/logs/$REQUEST_ID",
         response: r#"{
   "request_id": "…", "provider": "zai", "model": "glm-5.2", "status": 200, "latency_ms": 2887,
   "spans": [
@@ -394,7 +446,7 @@ gateway-authored outcomes.",
 parameter rather than a header, because browser `EventSource` cannot send one. Payloads follow the \
 lean list contract — no bodies, no spans.",
         params: &[Param { name: "token", location: "query", ty: "string", required: true, description: "Control-plane token, since EventSource can't set headers." }],
-        example: "curl -N 'http://localhost:8080/api/logs/stream?token=$KG_ADMIN'",
+        example: "curl -N \"http://localhost:8080/api/logs/stream?token=$KG_ADMIN\"",
         response: "",
     },
     Endpoint {
@@ -402,10 +454,10 @@ lean list contract — no bodies, no spans.",
         path: "/api/logs/stats",
         auth: Auth::LogsView,
         summary: "Aggregate stats over a filter",
-        description: "Totals, success/error counts, average latency, tokens, cost, cache hits. Takes the \
-same filter parameters as `/api/logs`.",
-        params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/logs/stats",
+        description: "Totals, success/error counts, average latency, tokens, cost, cache hits, over \
+whatever the filters select.",
+        params: &[F_PROVIDER, F_MODEL, F_STATUS, F_VKEY, F_SINCE, F_CACHE_HIT, F_SEARCH],
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/logs/stats",
         response: "",
     },
     Endpoint {
@@ -417,8 +469,9 @@ same filter parameters as `/api/logs`.",
         params: &[
             Param { name: "metric", location: "query", ty: "string", required: false, description: "`latency` (default) | `cost` | `tokens`." },
             Param { name: "buckets", location: "query", ty: "integer", required: false, description: "Bucket count, default 20." },
+            F_PROVIDER, F_MODEL, F_STATUS, F_VKEY, F_SINCE, F_CACHE_HIT, F_SEARCH,
         ],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' \\\n  'http://localhost:8080/api/logs/histogram?metric=latency'",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  'http://localhost:8080/api/logs/histogram?metric=latency'",
         response: "",
     },
     Endpoint {
@@ -427,8 +480,11 @@ same filter parameters as `/api/logs`.",
         auth: Auth::LogsView,
         summary: "Requests and errors over time",
         description: "Bucketed counts for the requests-over-time chart.",
-        params: &[Param { name: "bucket_ms", location: "query", ty: "integer", required: false, description: "Bucket width in ms, default 60000." }],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/logs/timeseries",
+        params: &[
+            Param { name: "bucket_ms", location: "query", ty: "integer", required: false, description: "Bucket width in ms, default 60000." },
+            F_PROVIDER, F_MODEL, F_STATUS, F_VKEY, F_SINCE, F_CACHE_HIT, F_SEARCH,
+        ],
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/logs/timeseries",
         response: "",
     },
     Endpoint {
@@ -441,8 +497,9 @@ same filter parameters as `/api/logs`.",
             Param { name: "by", location: "query", ty: "string", required: false, description: "`model` (default) | `provider` | `virtual_key`." },
             Param { name: "metric", location: "query", ty: "string", required: false, description: "`count` | `cost` | `tokens` | `errors`." },
             Param { name: "limit", location: "query", ty: "integer", required: false, description: "How many rows." },
+            F_PROVIDER, F_MODEL, F_STATUS, F_VKEY, F_SINCE, F_CACHE_HIT, F_SEARCH,
         ],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' \\\n  'http://localhost:8080/api/logs/rankings?by=model&metric=cost'",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  'http://localhost:8080/api/logs/rankings?by=model&metric=cost'",
         response: "",
     },
     Endpoint {
@@ -453,7 +510,7 @@ same filter parameters as `/api/logs`.",
         description: "The providers, models, and virtual keys actually present in the log, so the \
 dashboard's filter dropdowns offer real options.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/logs/filterdata",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/logs/filterdata",
         response: "",
     },
     Endpoint {
@@ -464,7 +521,7 @@ dashboard's filter dropdowns offer real options.",
         description: "The async batch writer drops rows rather than blocking requests when its channel \
 is full. A non-zero count here means the log is incomplete.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/logs/dropped",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/logs/dropped",
         response: "",
     },
     Endpoint {
@@ -475,7 +532,7 @@ is full. A non-zero count here means the log is incomplete.",
         description: "Which providers are registered and which capabilities (chat, embeddings, images, \
 audio, rerank) each one implements.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/providers",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/providers",
         response: "",
     },
     Endpoint {
@@ -485,7 +542,7 @@ audio, rerank) each one implements.",
         summary: "Provider configuration",
         description: "The provider block from `config.json`, with key values replaced by `<redacted>`.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/config/providers",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/config/providers",
         response: "",
     },
     Endpoint {
@@ -495,7 +552,7 @@ audio, rerank) each one implements.",
         summary: "Virtual-key configuration",
         description: "Configured virtual keys with their model allow/deny-lists, rate limits, and budgets.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/config/virtual-keys",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/config/virtual-keys",
         response: "",
     },
     Endpoint {
@@ -505,7 +562,7 @@ audio, rerank) each one implements.",
         summary: "Discovered MCP tools",
         description: "Tools exposed by the configured MCP servers, as injected into agentic requests.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/mcp/tools",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/mcp/tools",
         response: "",
     },
     Endpoint {
@@ -516,7 +573,7 @@ audio, rerank) each one implements.",
         description: "Which plugins are active, the database mode, cache settings — the non-secret \
 runtime picture behind the dashboard's settings pages.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/status",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/status",
         response: "",
     },
     Endpoint {
@@ -527,7 +584,7 @@ runtime picture behind the dashboard's settings pages.",
         description: "Lets a client show or hide controls it isn't allowed to use, rather than \
 discovering it by getting a 403.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/api/whoami",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/whoami",
         response: r#"{"role": "admin", "permissions": ["logs:view", "config:write", "logs:reveal"]}"#,
     },
     Endpoint {
@@ -537,7 +594,7 @@ discovering it by getting a 403.",
         summary: "Prometheus metrics",
         description: "Prometheus text exposition: request counts by status, latency, tokens, cost.",
         params: &[],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' http://localhost:8080/metrics",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/metrics",
         response: "",
     },
     // ---- Control plane: write ----
@@ -554,7 +611,7 @@ discovering it by getting a 403.",
             Param { name: "base_url", location: "body", ty: "string", required: false, description: "Override the vendor default. Required for unknown provider names." },
             Param { name: "keys", location: "body", ty: "array", required: true, description: "Weighted API keys; values may be `${ENV}` references." },
         ],
-        example: r#"curl -X PUT -H 'authorization: Bearer $KG_ADMIN' \
+        example: r#"curl -X PUT -H "authorization: Bearer $KG_ADMIN" \
   -H 'content-type: application/json' \
   http://localhost:8080/api/config/providers/moonshot \
   -d '{"keys":[{"id":"default","value":"${MOONSHOT_API_KEY}","weight":1}]}'"#,
@@ -567,7 +624,7 @@ discovering it by getting a 403.",
         summary: "Remove a provider",
         description: "Removes it from `config.json` and rebuilds the engine. In-flight requests finish.",
         params: &[Param { name: "name", location: "path", ty: "string", required: true, description: "Provider to remove." }],
-        example: "curl -X DELETE -H 'authorization: Bearer $KG_ADMIN' \\\n  http://localhost:8080/api/config/providers/moonshot",
+        example: "curl -X DELETE -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/config/providers/moonshot",
         response: "",
     },
     Endpoint {
@@ -585,7 +642,7 @@ request must then present a known key, including `/v1/models`.",
             Param { name: "max_total_tokens", location: "body", ty: "integer", required: false, description: "Cumulative token budget." },
             Param { name: "max_cost_per_period", location: "body", ty: "number", required: false, description: "USD budget per rolling period, from the estimated price table." },
         ],
-        example: r#"curl -X PUT -H 'authorization: Bearer $KG_ADMIN' \
+        example: r#"curl -X PUT -H "authorization: Bearer $KG_ADMIN" \
   -H 'content-type: application/json' \
   http://localhost:8080/api/config/virtual-keys/vk_team_alpha \
   -d '{"name":"Team Alpha","max_requests_per_min":60}'"#,
@@ -598,7 +655,7 @@ request must then present a known key, including `/v1/models`.",
         summary: "Remove a virtual key",
         description: "Removing the last one returns the data plane to open mode.",
         params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "Virtual key to remove." }],
-        example: "curl -X DELETE -H 'authorization: Bearer $KG_ADMIN' \\\n  http://localhost:8080/api/config/virtual-keys/vk_team_alpha",
+        example: "curl -X DELETE -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/config/virtual-keys/vk_team_alpha",
         response: "",
     },
     // ---- Redaction ----
@@ -610,7 +667,7 @@ request must then present a known key, including `/v1/models`.",
         description: "Decrypts the AES-GCM reversible redaction mapping and returns the original \
 request/response bodies. Admin-only and audited — the reveal itself is logged with the token's name.",
         params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "The request id." }],
-        example: "curl -H 'authorization: Bearer $KG_ADMIN' \\\n  http://localhost:8080/api/logs/$REQUEST_ID/reveal",
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/logs/$REQUEST_ID/reveal",
         response: "",
     },
 ];

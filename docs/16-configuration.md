@@ -34,6 +34,7 @@ Unknown top-level keys are ignored. Every field is optional except where noted; 
 | `semantic_cache` | [SemanticCacheConfig](#semanticcacheconfig)? | *none* (off) | Embedding-similarity response cache. |
 | `mcp` | [McpConfig](#mcpconfig)? | *none* (off) | Model Context Protocol tool gateway for agentic tool-calling. |
 | `request_timeout_secs` | u64? | *none* (`120`) | Global per-request timeout in seconds; exceeding it returns `408 Request Timeout`. |
+| `public_url` | string? | *none* (derived from `Host`) | Origin this gateway is reached at, e.g. `https://gw.example.com`. Used as the base URL in the generated docs (`/openapi.json`, `/llms.txt`, examples). **Set this in production:** with it unset the base URL comes from the request's `Host`, which is attacker-controlled, so a spoofed header behind a cache that doesn't vary on it could hand readers a spec pointing at another origin. |
 | `cors_allow_origins` | [string]? | *none* (permissive) | Explicit CORS allow-list. When unset or empty, any origin is allowed (fine for local dev; set it in production). |
 | `log_retention_days` | u32? | *none* (kept forever) | When set and > 0, a background sweep deletes logs older than this (hourly, first sweep at startup). Re-read from live config, so hot-reload needs no restart. |
 | `content_logging` | [ContentLoggingConfig](#contentloggingconfig)? | *none* (off) | Opt-in request/response **body** capture (M10 Phase 2). Bodies are admin-only. |
