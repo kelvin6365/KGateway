@@ -88,17 +88,32 @@ export function TraceWaterfall({ spans }: { spans: TraceSpan[] }) {
 
       <div className="overflow-x-auto">
         <div className="min-w-[420px]">
-          {/* Ruler. Three ticks only — at drawer widths, quarters collide. */}
+          {/* Ruler — the shared scale every bar below is measured against. */}
           <div className={`${GRID} border-b pb-1`}>
             <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
               Stage
             </span>
-            <div className="flex justify-between font-mono text-[10px] tabular-nums text-muted-foreground">
-              <span>0</span>
-              <span>{formatDuration(total * 0.25)}</span>
-              <span>{formatDuration(total * 0.5)}</span>
-              <span>{formatDuration(total * 0.75)}</span>
-              <span>{formatDuration(total)}</span>
+            {/* Absolute offsets, not `justify-between`: the latter spaces boxes of
+                differing widths evenly, so a label's centre drifts off the gridline it
+                annotates and a bar reads against the wrong time. */}
+            <div className="relative h-4">
+              {[0, 0.25, 0.5, 0.75, 1].map((t, i, arr) => (
+                <span
+                  key={t}
+                  className="absolute top-0 font-mono text-[10px] tabular-nums whitespace-nowrap text-muted-foreground"
+                  style={{
+                    left: `${t * 100}%`,
+                    transform:
+                      i === 0
+                        ? "none"
+                        : i === arr.length - 1
+                          ? "translateX(-100%)"
+                          : "translateX(-50%)",
+                  }}
+                >
+                  {t === 0 ? "0" : formatDuration(total * t)}
+                </span>
+              ))}
             </div>
             <span className="text-right text-[10px] uppercase tracking-wide text-muted-foreground">
               Took

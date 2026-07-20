@@ -18,8 +18,10 @@ collected under a single `Unreleased` section until the first tagged release.
   is linkable and the browser back button closes it; it replaces the old detail drawer. New `kgateway_core::trace` (`Span` / `SpanCategory` / `SpanCollector`) plus
   `Ctx::timed` / `Ctx::span_at` for instrumenting a stage.
 
-  Spans carry **no request content** — only stage names, timings, and outcomes — so unlike
-  content capture they are recorded unconditionally with nothing to opt into. They are
+  Spans carry **no request content and no upstream error text** — only stage names, timings,
+  and gateway-authored outcomes — so unlike content capture they are recorded unconditionally
+  with nothing to opt into. They are bounded (256 spans/request, 400-byte details), so a
+  provider returning huge error pages across a retry chain cannot inflate an audit row. They are
   returned **only** by `GET /api/logs/{id}` (as a real JSON array, not a JSON-encoded
   string); list and SSE live-tail responses omit them, matching the captured-body contract.
   Storage cost is roughly 300–600 bytes per audit row, in a new nullable `spans` column

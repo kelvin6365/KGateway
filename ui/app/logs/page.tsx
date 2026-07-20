@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, Copy, Radio } from "lucide-react";
@@ -437,13 +437,24 @@ function LogsPageContent() {
       setSelectedLog(log);
       const next = new URLSearchParams(searchParams.toString());
       next.set("request", log.request_id);
+      pushedRef.current = true;
       router.push(`${pathname}?${next}`, { scroll: false });
     },
     [pathname, router, searchParams],
   );
 
+  // Set when *we* pushed the history entry, so closing can pop it instead of stacking a
+  // second /logs entry that makes the first Back press look like a no-op.
+  const pushedRef = useRef(false);
+
   const closeDetail = useCallback(() => {
     setSelectedLog(null);
+    if (pushedRef.current) {
+      pushedRef.current = false;
+      router.back();
+      return;
+    }
+    // Arrived by deep link: there is no entry of ours to pop.
     const next = new URLSearchParams(searchParams.toString());
     next.delete("request");
     const qs = next.toString();
@@ -971,7 +982,7 @@ function LogsPageContent() {
       {/* Detail dialog. Open state lives in the URL (?request=<id>) so a trace is
           shareable and the browser back button closes it. */}
       <Dialog
-        open={!!selectedLog}
+        open={!!requestParam}
         onOpenChange={(o) => {
           if (!o) closeDetail();
         }}
@@ -981,12 +992,29 @@ function LogsPageContent() {
         <DialogContent onOpenAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle>Request trace</DialogTitle>
-            {selectedLog && (
-              <span className="font-mono text-[11px] break-all text-muted-foreground">
-                {selectedLog.request_id} · {formatTime(selectedLog.created_at)}
-              </span>
-            )}
+            <span className="font-mono text-[11px] break-all text-muted-foreground">
+              {requestParam}
+              {selectedLog && ` · ${formatTime(selectedLog.created_at)}`}
+            </span>
           </DialogHeader>
+          {!selectedLog && (
+            <DialogBody>
+              <div className="mx-auto w-full max-w-[1400px] px-5 py-5">
+                {logDetailError ? (
+                  <div className="rounded-md border px-4 py-3 text-sm text-muted-foreground">
+                    This request could not be loaded
+                    {(logDetailErrorObj as Error | undefined)?.message
+                      ? ` (${(logDetailErrorObj as Error).message})`
+                      : ""}
+                    . It may have aged out of the retention window, or the control plane may
+                    need an admin token.
+                  </div>
+                ) : (
+                  <Skeleton className="h-40 w-full rounded-md" />
+                )}
+              </div>
+            </DialogBody>
+          )}
           {selectedLog && (
             <DialogBody>
               <div className="mx-auto w-full max-w-[1400px]">

@@ -246,10 +246,7 @@ pub async fn log_detail(State(state): State<SharedState>, Path(id): Path<String>
             // JSON-inside-a-string they'd have to double-parse. Unparseable content is
             // dropped, not forwarded — a corrupt trace must not break the detail read.
             let mut body = serde_json::to_value(&log).unwrap_or_else(|_| serde_json::json!({}));
-            let parsed = log
-                .spans
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            let parsed = decode_spans(log.spans.as_deref());
             match parsed {
                 Some(v) => body["spans"] = v,
                 None => {
@@ -585,6 +582,17 @@ fn providers_fingerprint(config: &crate::config::Config) -> String {
         .collect();
     parts.sort();
     parts.join(";")
+}
+
+/// Decode the stored `spans` JSON string for the wire.
+///
+/// Must yield an ARRAY or nothing: the client contract is `spans?: TraceSpan[]`, and a
+/// stored `{...}`, `null`, or `"…"` would pass a parse-only check and then blow up
+/// `spans.filter(...)` during render — taking out the whole logs route rather than just
+/// the one corrupt row.
+fn decode_spans(raw: Option<&str>) -> Option<serde_json::Value> {
+    raw.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .filter(|v| v.is_array())
 }
 
 /// Wire protocol a provider's model-list endpoint speaks.
@@ -1030,6 +1038,41 @@ fn store_error_response(e: kgateway_store::StoreError) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod decode_spans_tests {
+    use super::*;
+
+    #[test]
+    fn passes_through_a_well_formed_array() {
+        let raw = r#"[{"name":"attempt","category":"failed","start_us":1,"dur_us":2,"depth":1}]"#;
+        let out = decode_spans(Some(raw)).expect("array decodes");
+        assert_eq!(out.as_array().unwrap().len(), 1);
+        assert_eq!(out[0]["name"], "attempt");
+    }
+
+    #[test]
+    fn drops_valid_json_that_is_not_an_array() {
+        // The dangerous case: parses fine, then breaks the dashboard on render.
+        for raw in [r#"{"name":"attempt"}"#, "null", "\"oops\"", "42"] {
+            assert!(decode_spans(Some(raw)).is_none(), "should drop: {raw}");
+        }
+    }
+
+    #[test]
+    fn drops_unparseable_or_absent_values() {
+        assert!(decode_spans(Some("[{trunc")).is_none());
+        assert!(decode_spans(None).is_none());
+    }
+
+    #[test]
+    fn an_empty_array_is_still_an_array() {
+        assert_eq!(
+            decode_spans(Some("[]")).unwrap().as_array().unwrap().len(),
+            0
+        );
+    }
 }
 
 #[cfg(test)]

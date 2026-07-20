@@ -16,6 +16,27 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+/// Upper bounds on one request's trace. A request can legitimately walk
+/// `MAX_FALLBACKS` providers × `MAX_KEYS_PER_PROVIDER` keys, so the span count has a
+/// real ceiling — but an agentic loop or a future caller shouldn't be able to grow a
+/// row without limit, and the trace is stored whether or not content capture is on.
+const MAX_SPANS_PER_REQUEST: usize = 256;
+const MAX_SPAN_NAME: usize = 160;
+const MAX_SPAN_DETAIL: usize = 400;
+const MAX_SPAN_OUTCOME: usize = 32;
+
+/// Truncate in place at a char boundary, so a multibyte codepoint is never split.
+fn truncate_on_char_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 /// What kind of work a span represents. Drives the colour band in the UI and
 /// keeps the vocabulary stable across the engine, plugins, and connectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,11 +140,26 @@ impl SpanCollector {
         });
     }
 
-    /// Push a pre-built span. A poisoned lock is ignored rather than panicking —
-    /// losing a trace row must never fail the request it is describing.
-    pub fn push(&self, span: Span) {
+    /// Push a pre-built span, clamped so one request can't bloat its audit row.
+    ///
+    /// Both bounds are defence in depth. Callers are expected to author short,
+    /// gateway-side text (never an upstream error body — see
+    /// `engine::attempt_failure_detail`), but a trace is persisted unconditionally
+    /// while captured bodies are opt-in and size-capped, so this must not be the one
+    /// unbounded field on the row. A poisoned lock is ignored rather than panicking:
+    /// losing a trace row must never fail the request it describes.
+    pub fn push(&self, mut span: Span) {
+        truncate_on_char_boundary(&mut span.name, MAX_SPAN_NAME);
+        if let Some(d) = span.detail.as_mut() {
+            truncate_on_char_boundary(d, MAX_SPAN_DETAIL);
+        }
+        if let Some(o) = span.outcome.as_mut() {
+            truncate_on_char_boundary(o, MAX_SPAN_OUTCOME);
+        }
         if let Ok(mut v) = self.spans.lock() {
-            v.push(span);
+            if v.len() < MAX_SPANS_PER_REQUEST {
+                v.push(span);
+            }
         }
     }
 
@@ -227,6 +263,61 @@ mod tests {
         assert_eq!(back[0].category, SpanCategory::Failed);
         // Category serializes snake_case for a stable UI contract.
         assert!(json.contains("\"category\":\"failed\""));
+    }
+
+    #[test]
+    fn oversized_fields_and_runaway_span_counts_are_clamped() {
+        // The trace is the one field on an audit row written unconditionally — captured
+        // bodies are opt-in and size-capped — so it must not be the way a row grows without
+        // bound when an upstream returns a huge error page across many retries.
+        let c = SpanCollector::new();
+        let start = Instant::now();
+        c.record_detailed(
+            start,
+            start,
+            Duration::from_millis(1),
+            "x".repeat(10_000),
+            SpanCategory::Failed,
+            1,
+            Some("y".repeat(500)),
+            Some("z".repeat(100_000)),
+        );
+        let s = &c.snapshot()[0];
+        assert!(s.name.len() <= MAX_SPAN_NAME);
+        assert!(s.detail.as_ref().unwrap().len() <= MAX_SPAN_DETAIL);
+        assert!(s.outcome.as_ref().unwrap().len() <= MAX_SPAN_OUTCOME);
+
+        for _ in 0..(MAX_SPANS_PER_REQUEST + 50) {
+            c.record(
+                start,
+                start,
+                Duration::from_micros(1),
+                "spam",
+                SpanCategory::Gateway,
+                1,
+            );
+        }
+        assert_eq!(c.snapshot().len(), MAX_SPANS_PER_REQUEST);
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        let c = SpanCollector::new();
+        let start = Instant::now();
+        // 'é' is 2 bytes; a naive cut at MAX_SPAN_DETAIL would land mid-codepoint.
+        c.record_detailed(
+            start,
+            start,
+            Duration::from_millis(1),
+            "n",
+            SpanCategory::Gateway,
+            1,
+            None,
+            Some("é".repeat(MAX_SPAN_DETAIL)),
+        );
+        let d = c.snapshot()[0].detail.clone().unwrap();
+        assert!(d.len() <= MAX_SPAN_DETAIL);
+        assert!(d.chars().all(|ch| ch == 'é'), "valid UTF-8 preserved");
     }
 
     #[test]

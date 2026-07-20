@@ -45,6 +45,35 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// add a noise row to every trace without telling the operator anything.
 const SEMAPHORE_WAIT_SPAN_FLOOR: std::time::Duration = std::time::Duration::from_micros(200);
 
+/// Describe a failed upstream attempt for the trace **in our own words**.
+///
+/// Deliberately does NOT copy `KgError::message`: that holds the raw upstream error
+/// body, which can echo the user's prompt back (a provider rejecting content quotes
+/// it), and spans are persisted unconditionally — unlike captured bodies, which are
+/// opt-in twice and pass through the redactor. Copying it would smuggle request
+/// content into the audit row with content capture switched off, and unbounded in
+/// size. The raw detail stays in the row's `error_message`, which is the sanctioned
+/// server-side field for it.
+fn attempt_failure_detail(e: &KgError) -> String {
+    let cause = match e.kind {
+        KgErrorKind::RateLimit => "Rate limited by the provider.",
+        KgErrorKind::Auth => "The provider rejected this key.",
+        KgErrorKind::Network => "Network error reaching the provider.",
+        KgErrorKind::BadRequest => "The provider rejected the request as invalid.",
+        KgErrorKind::Provider => "The provider returned an error.",
+        KgErrorKind::Unsupported => "The provider does not support this operation.",
+        KgErrorKind::Internal => "Gateway error while dispatching.",
+    };
+    let next = if e.is_retryable() {
+        " Retryable — failing over."
+    } else if e.is_key_rotatable() {
+        " Rotating to another key."
+    } else {
+        " Not retryable — giving up."
+    };
+    format!("{cause}{next} See this request's error detail for the upstream text.")
+}
+
 /// Which colour band a plugin's span belongs to. Cache plugins get their own band
 /// because "did the cache save us a call?" is the question traces are read for.
 fn plugin_category(plugin_name: &str) -> SpanCategory {
@@ -543,10 +572,20 @@ impl Kgateway {
             req.messages.push(msg.clone());
             let calls = msg.tool_calls.clone();
             for tc in &calls {
-                let result = self
+                let tool_at = std::time::Instant::now();
+                let outcome = self
                     .execute_tool(&tc.function.name, &tc.function.arguments)
-                    .await
-                    .unwrap_or_else(|e| format!("tool error: {e}"));
+                    .await;
+                ctx.span_at(
+                    tool_at,
+                    tool_at.elapsed(),
+                    format!("mcp.{}", tc.function.name),
+                    SpanCategory::Tools,
+                    1,
+                    outcome.as_ref().err().map(|_| "error".to_string()),
+                    None,
+                );
+                let result = outcome.unwrap_or_else(|e| format!("tool error: {e}"));
                 req.messages.push(Message {
                     role: Role::Tool,
                     content: Some(result),
@@ -556,6 +595,10 @@ impl Kgateway {
                 });
             }
 
+            // Each round writes its own audit row. Without a fresh collector every row
+            // would carry all previous rounds' spans — quadratic storage, and the
+            // dashboard's attempt count would read a 5-round tool loop as 5 failovers.
+            ctx.spans = std::sync::Arc::new(crate::trace::SpanCollector::new());
             last = self.chat(ctx, req.clone()).await?;
         }
         // Hit the round cap with tool calls still pending — return the last response.
@@ -682,7 +725,7 @@ impl Kgateway {
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "error".into())
                 }),
-                call.as_ref().err().map(|e| e.message.clone()),
+                call.as_ref().err().map(attempt_failure_detail),
             );
             match call {
                 Ok(resp) => return Ok(resp),
@@ -1187,7 +1230,6 @@ impl Kgateway {
                     Some("Exponential backoff before retrying on the next key.".into()),
                 );
             }
-            let attempt_at = std::time::Instant::now();
             // Acquire the permit before opening; hold it on success, drop on failure so a
             // failed attempt never leaks a permit.
             let queued_at = std::time::Instant::now();
@@ -1207,6 +1249,10 @@ impl Kgateway {
                     Some("Waited for a per-provider concurrency permit.".into()),
                 );
             }
+            // Stamped after the permit: queue time is its own `semaphore.acquire` span, and
+            // folding it into TTFT would report the gateway's own backpressure as the
+            // model being slow to answer.
+            let attempt_at = std::time::Instant::now();
             let opened = entry.provider.chat_stream(ctx, chosen, req.clone()).await;
             let mut stream = match opened {
                 Ok(s) => s,
@@ -1223,7 +1269,7 @@ impl Kgateway {
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| "error".into()),
                         ),
-                        Some(e.message.clone()),
+                        Some(attempt_failure_detail(&e)),
                     );
                     let rotatable = e.is_key_rotatable();
                     last_err = e;
@@ -1261,6 +1307,22 @@ impl Kgateway {
                 }
                 Ok(Some(Err(e))) => {
                     drop(permit);
+                    // A 200 followed by an in-band error event — the exact case the
+                    // first-chunk peek exists to catch. Without a span the failed try is
+                    // invisible and its cost reads as the next attempt being slow.
+                    ctx.span_at(
+                        attempt_at,
+                        attempt_at.elapsed(),
+                        format!("attempt · {provider_key} key={}", chosen.id),
+                        SpanCategory::Failed,
+                        1,
+                        Some(
+                            e.status
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "stream error".into()),
+                        ),
+                        Some(attempt_failure_detail(&e)),
+                    );
                     let rotatable = e.is_key_rotatable();
                     last_err = e;
                     if !rotatable {
@@ -1270,6 +1332,18 @@ impl Kgateway {
                 }
                 Err(_elapsed) => {
                     drop(permit);
+                    ctx.span_at(
+                        attempt_at,
+                        attempt_at.elapsed(),
+                        format!("attempt · {provider_key} key={}", chosen.id),
+                        SpanCategory::Failed,
+                        1,
+                        Some("timeout".into()),
+                        Some(
+                            "No first chunk before the idle timeout. Retryable — failing over."
+                                .into(),
+                        ),
+                    );
                     // No first chunk in time — treat as a retryable network error.
                     last_err = KgError::new(
                         KgErrorKind::Network,
@@ -1766,6 +1840,71 @@ mod tests {
 
         // Timeline order: the failed attempt must precede the fallback that replaced it.
         assert!(attempts[0].start_us <= attempts[1].start_us);
+    }
+
+    #[tokio::test]
+    async fn trace_never_carries_upstream_error_text() {
+        // Spans are persisted unconditionally, unlike captured bodies (opt-in twice and
+        // redacted). If an upstream echoes the user's prompt back in its error — providers
+        // do this when rejecting content — copying that message into a span would smuggle
+        // request content into the audit row with content capture switched off.
+        const LEAKY: &str = "rejected: content \"my SSN is 123-45-6789\" violates policy";
+
+        let mut registry = Registry::new();
+        struct LeakyProvider;
+        #[async_trait]
+        impl Provider for LeakyProvider {
+            fn key(&self) -> ProviderKey {
+                ProviderKey::new("openai")
+            }
+            async fn chat(
+                &self,
+                _ctx: &Ctx,
+                _key: &ApiKey,
+                _req: ChatRequest,
+            ) -> Result<ChatResponse, KgError> {
+                Err(KgError::provider(LEAKY, 400))
+            }
+            async fn chat_stream(
+                &self,
+                _ctx: &Ctx,
+                _key: &ApiKey,
+                _req: ChatRequest,
+            ) -> Result<ChunkStream, KgError> {
+                Err(KgError::provider(LEAKY, 400))
+            }
+        }
+        registry.register(Arc::new(LeakyProvider), vec![key("k")]);
+        let engine = Kgateway::new(registry);
+
+        let mut ctx = Ctx::new();
+        let _ = engine.chat(&mut ctx, req()).await;
+
+        let spans = ctx.spans.snapshot();
+        assert!(!spans.is_empty(), "the failed attempt is traced");
+        for sp in &spans {
+            let blob = format!(
+                "{} {} {}",
+                sp.name,
+                sp.detail.as_deref().unwrap_or(""),
+                sp.outcome.as_deref().unwrap_or("")
+            );
+            assert!(
+                !blob.contains("123-45-6789") && !blob.contains("violates policy"),
+                "upstream error text leaked into a span: {sp:?}"
+            );
+        }
+        // The status still reaches the operator as a chip, and our own wording explains it.
+        let attempt = spans
+            .iter()
+            .find(|s| s.name.starts_with("attempt ·"))
+            .unwrap();
+        assert_eq!(attempt.outcome.as_deref(), Some("400"));
+        let detail = attempt.detail.as_deref().unwrap();
+        assert!(
+            detail.contains("provider returned an error") && detail.contains("Not retryable"),
+            "detail should be our own words about the failure: {detail}"
+        );
     }
 
     #[tokio::test]
