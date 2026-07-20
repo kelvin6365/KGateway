@@ -13,6 +13,40 @@ balancing, semantic caching, governance, redaction, MCP tool-calling, and full o
 > agentic MCP tool-calling, and a live Next.js dashboard — at **~3.5 µs** per-request overhead.
 > ~230 tests, green under `clippy -D warnings` + `fmt`. See [`docs/02-roadmap.md`](docs/02-roadmap.md).
 
+![KGateway dashboard](docs/images/dashboard.png)
+
+<details>
+<summary><b>More screenshots</b> — request tracing, logs, playground, providers</summary>
+
+### Per-request tracing
+
+Every request records a stage-by-stage waterfall. Here a call to a self-hosted node fails in
+439 µs, fails over to a second provider, and still streams a first token 2.29 s in — the client
+never sees the failure.
+
+![Request trace waterfall](docs/images/request-trace.png)
+
+### Logs
+
+Filter by provider, model, virtual key, status, or free text; tail live traffic over SSE.
+
+![Request logs](docs/images/logs.png)
+
+### Playground
+
+Multi-turn, streaming, against any configured `provider/model`.
+
+![Playground](docs/images/playground.png)
+
+### Providers
+
+Connect a provider from the catalog — changes persist to `config.json` and hot-reload without a
+restart.
+
+![Providers](docs/images/providers.png)
+
+</details>
+
 ## What you can do
 
 - **Talk to any provider through one API.** Point any OpenAI SDK at KGateway and route to 25
