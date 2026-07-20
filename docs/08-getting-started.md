@@ -317,7 +317,7 @@ The `/api/*` control plane and `/metrics` power the dashboard and are scriptable
 ```bash
 curl localhost:8080/metrics                 # Prometheus text
 curl localhost:8080/api/logs                 # filtered/paginated request audit log (JSON)
-curl localhost:8080/api/logs/{id}            # single-request detail (incl. captured bodies)
+curl localhost:8080/api/logs/{id}            # single-request detail (captured bodies + trace spans)
 curl localhost:8080/api/logs/stats           # aggregate stats
 curl localhost:8080/api/logs/timeseries      # analytics: requests/errors over time
 curl localhost:8080/api/logs/{id}/reveal     # un-redact bodies (admin / logs:reveal only)

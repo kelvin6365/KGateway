@@ -411,3 +411,40 @@ async fn v1_models_is_cached_and_vkey_gated_in_strict_mode() {
     assert_eq!(b1, b2);
     assert_eq!(b1["data"][0]["id"], "moonshot/kimi-k3");
 }
+
+#[tokio::test]
+async fn trace_spans_are_detail_only_and_arrive_as_a_json_array() {
+    // The waterfall UI consumes `spans` as an array; if it ever regressed to a
+    // JSON-encoded string the dashboard would silently render nothing. And spans must
+    // stay off the list path so a 200-row page doesn't drag every trace with it.
+    let upstream = mock_upstream().await;
+    let app = build(upstream.uri()).await;
+    let id = chat_and_wait_for_log(&app, "trace me").await;
+
+    let (_, list) = send(&app, get("/api/logs", Some("admin-tok"))).await;
+    assert!(
+        list["logs"][0].get("spans").is_none(),
+        "list rows must not carry traces"
+    );
+
+    let (status, detail) = send(&app, get(&format!("/api/logs/{id}"), Some("admin-tok"))).await;
+    assert_eq!(status, 200);
+    let spans = detail["spans"]
+        .as_array()
+        .expect("detail returns spans as a real array, not a string");
+    assert!(!spans.is_empty(), "a dispatched request records stages");
+
+    // The dispatch attempt is the span the whole feature exists to show.
+    let attempt = spans
+        .iter()
+        .find(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("attempt ·"))
+        })
+        .expect("the upstream attempt is traced");
+    assert_eq!(attempt["category"], "network");
+    assert!(attempt["dur_us"].as_u64().is_some());
+    assert!(attempt["start_us"].as_u64().is_some());
+    assert_eq!(attempt["depth"], 1);
+}

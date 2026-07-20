@@ -58,6 +58,13 @@ pub struct RequestLog {
     /// Captured response payload (truncated JSON). Same population rules as `request_body`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body: Option<String>,
+    /// Trace spans as a JSON array — the per-stage timings behind the dashboard's call
+    /// waterfall (see `kgateway_core::trace`). Same population rules as `request_body`:
+    /// detail reads only, so list/live-tail payloads stay lean. Unlike captured bodies
+    /// these hold no request content — only stage names, timings, and outcomes — so they
+    /// are recorded by default rather than opt-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spans: Option<String>,
     /// Whether the captured bodies had secrets/PII redacted (M11). Safe to expose — it's a
     /// flag, not content — so the UI can show a "redacted" badge and a reveal affordance.
     #[serde(default)]
@@ -483,8 +490,8 @@ pub trait LogStore: Send + Sync {
     }
 
     /// Recent logs, newest first. Implementations MUST NOT populate `request_body`/
-    /// `response_body` here — list/live-tail paths stay lean; content is fetched only by
-    /// [`LogStore::get`].
+    /// `response_body`/`spans` here — list/live-tail paths stay lean; content and traces
+    /// are fetched only by [`LogStore::get`].
     async fn recent(&self, limit: usize) -> Result<Vec<RequestLog>, StoreError>;
 
     /// Filtered, sorted, paginated query.
@@ -499,7 +506,8 @@ pub trait LogStore: Send + Sync {
 
     /// A single log by request id. Implementations MUST NOT populate `redaction_mapping`
     /// here — the encrypted mapping is loaded only by [`LogStore::get_with_mapping`], used
-    /// by the `logs:reveal` endpoint. (`request_body`/`response_body` ARE loaded here.)
+    /// by the `logs:reveal` endpoint. (`request_body`/`response_body`/`spans` ARE loaded
+    /// here.)
     async fn get(&self, request_id: &str) -> Result<Option<RequestLog>, StoreError> {
         Ok(self
             .recent(DEFAULT_SCAN_LIMIT)
@@ -601,14 +609,15 @@ impl LogStore for MemoryLogStore {
     }
     async fn recent(&self, limit: usize) -> Result<Vec<RequestLog>, StoreError> {
         let g = self.inner.lock().unwrap();
-        // Strip bodies + mapping from list results to match the DB backends' lean-list
-        // contract (the `redacted` flag is kept — it's a safe badge).
+        // Strip bodies + spans + mapping from list results to match the DB backends'
+        // lean-list contract (the `redacted` flag is kept — it's a safe badge).
         Ok(g.iter()
             .rev()
             .take(limit)
             .map(|l| RequestLog {
                 request_body: None,
                 response_body: None,
+                spans: None,
                 redaction_mapping: None,
                 ..l.clone()
             })
@@ -696,6 +705,7 @@ mod tests {
             error_message: None,
             request_body: None,
             response_body: None,
+            spans: None,
             redacted: false,
             redaction_mapping: None,
         }

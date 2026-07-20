@@ -8,6 +8,22 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Per-request call tracing + dashboard waterfall.** Every request now records per-stage
+  trace spans — each observer check, each plugin's `pre_llm` (so a cache hit reads as
+  "served here, no upstream call"), **every dispatch attempt including the ones that failed
+  before a successful retry**, backoff sleeps, contended concurrency permits,
+  time-to-first-token, and stream-body transfer. The log detail drawer renders them as a
+  waterfall, so a slow request shows *where* the time went instead of one opaque
+  `latency_ms`. New `kgateway_core::trace` (`Span` / `SpanCategory` / `SpanCollector`) plus
+  `Ctx::timed` / `Ctx::span_at` for instrumenting a stage.
+
+  Spans carry **no request content** — only stage names, timings, and outcomes — so unlike
+  content capture they are recorded unconditionally with nothing to opt into. They are
+  returned **only** by `GET /api/logs/{id}` (as a real JSON array, not a JSON-encoded
+  string); list and SSE live-tail responses omit them, matching the captured-body contract.
+  Storage cost is roughly 300–600 bytes per audit row, in a new nullable `spans` column
+  (SQLite + Postgres migrations included, so existing databases upgrade in place).
+
 - **`/v1/models` caching + strict-mode gating.** The aggregated listing is now cached for 5
   minutes behind a **provider-set fingerprint** (provider names, kinds, base URLs, key *ids* —
   never key values), so config edits / SIGHUP reloads invalidate it immediately rather than

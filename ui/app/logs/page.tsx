@@ -48,6 +48,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/baroque/empty-state";
+import { TraceWaterfall } from "@/components/trace-waterfall";
 import { AnalyticsPanel, type TimeRange } from "./analytics";
 
 const LIVE_BUFFER_CAP = 200;
@@ -956,6 +957,12 @@ export default function LogsPage() {
                   </div>
                 ))}
               </dl>
+
+              {logDetail?.spans && logDetail.spans.length > 0 && (
+                <div className="border-t pt-4">
+                  <TraceWaterfall spans={logDetail.spans} />
+                </div>
+              )}
 
               <div className="flex flex-col gap-4 border-t pt-4">
                 {(logDetail?.redacted ?? selectedLog.redacted) && (

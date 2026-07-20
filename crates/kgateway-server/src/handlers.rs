@@ -241,7 +241,25 @@ pub async fn logs_dropped(State(state): State<SharedState>) -> Response {
 /// `GET /api/logs/{id}` — a single request log by id (control-plane).
 pub async fn log_detail(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     match state.log_store.get(&id).await {
-        Ok(Some(log)) => Json(log).into_response(),
+        Ok(Some(log)) => {
+            // `spans` is stored as a JSON string; hand clients a real array rather than
+            // JSON-inside-a-string they'd have to double-parse. Unparseable content is
+            // dropped, not forwarded — a corrupt trace must not break the detail read.
+            let mut body = serde_json::to_value(&log).unwrap_or_else(|_| serde_json::json!({}));
+            let parsed = log
+                .spans
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            match parsed {
+                Some(v) => body["spans"] = v,
+                None => {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.remove("spans");
+                    }
+                }
+            }
+            Json(body).into_response()
+        }
         Ok(None) => (
             axum::http::StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -1266,6 +1284,7 @@ mod logs_tests {
             error_message: None,
             request_body: None,
             response_body: None,
+            spans: None,
             redacted: false,
             redaction_mapping: None,
         }

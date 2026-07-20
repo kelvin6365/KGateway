@@ -341,6 +341,42 @@ Function-/tool-calling now works over SSE (audit finding **L**).
 
 ---
 
+## M25 — Per-request call tracing ✅ DONE
+
+**Goal:** answer "where did this request's time actually go?" — which one `latency_ms`
+number cannot.
+
+- [x] **`kgateway_core::trace`** — `Span { name, category, start_us, dur_us, depth, outcome,
+  detail }`, eight `SpanCategory` bands, and a `SpanCollector` behind a mutex (most of the
+  pipeline holds `&Ctx`, not `&mut Ctx`) inside an `Arc` (a streamed response outlives the
+  borrow). Microsecond precision so a sub-millisecond cache hit doesn't render as `0`.
+- [x] **Engine instrumentation** — observer checks, per-plugin `pre_llm`, every dispatch
+  attempt (with its upstream status as an outcome chip), backoff sleeps, contended semaphore
+  waits (floored at 200 µs so uncontended permits don't add noise rows), time-to-first-token,
+  and stream-body transfer.
+- [x] **Persistence** — nullable `spans` column on SQLite + Postgres with in-place
+  migrations; detail-read-only, mirroring the captured-body contract (list, `query`, and the
+  SSE live tail all strip it).
+- [x] **API** — `GET /api/logs/{id}` returns spans as a real JSON array rather than
+  JSON-inside-a-string; a corrupt trace is dropped rather than breaking the read.
+- [x] **Dashboard** — `TraceWaterfall` in the log detail drawer, built on the existing
+  `RankingsTable` bar idiom and theme tokens (no new palette, no charting dependency) so it
+  reads natively at the drawer's ~448px width.
+- [x] Tests: failover records one span per attempt with its status; a cache short-circuit
+  records a hit and **no** upstream attempt; a streamed request's trace survives into its
+  deferred audit record; spans round-trip on detail but are stripped from lists; the API
+  returns an array. `cargo test/clippy/fmt` + `pnpm lint/build` green (203 tests).
+
+**Caught during the build:** the deferred stream-capture guard rebuilt a fresh `Ctx` to emit
+its audit record after the borrow ended, so *every streamed request* logged an empty trace
+while unary requests traced correctly. Sharing the collector by `Arc` fixed it; there is now
+a regression test pinning it.
+
+**Deferred:** per-chunk stream timing (would show mid-stream stalls, but multiplies row
+size); emitting these as OTLP child spans so the waterfall and Jaeger/Grafana agree.
+
+---
+
 ## 🎉 M0–M9 complete
 
 KGateway is a working, tested Rust + Next.js LLM gateway: **13 providers**, multimodal (chat/embeddings/images/audio/rerank), failover + load-balancing + per-provider isolation, a capability-segmented plugin pipeline, governance (virtual keys / budgets / rate limits), SQLite **and** Postgres persistence, semantic cache, Prometheus metrics, agentic MCP tool-calling, a live Next.js dashboard, Docker + Helm deployment, and ~2.8 µs per-request overhead — every milestone runtime-verified. Remaining items are explicit follow-ons (transport-heavy connectors: Bedrock/Vertex/Azure; real MCP transport via `rmcp`; OTLP export; live-config write APIs), and the architecture is ready for each.

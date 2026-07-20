@@ -80,11 +80,33 @@ export interface RequestLog {
    */
   response_body?: string | null;
   /**
+   * Per-stage trace spans behind the call waterfall. Like the captured bodies, only
+   * populated by GET /api/logs/{id} — list and live-tail responses omit it. Unlike the
+   * bodies it carries no request content, so it is recorded for every request rather
+   * than opt-in.
+   */
+  spans?: TraceSpan[] | null;
+  /**
    * True when the captured `request_body`/`response_body` have had secrets/PII replaced by
    * `⟦REDACTED:n⟧` placeholders. Present on both list and detail responses. Admins with the
    * `logs:reveal` permission can fetch the originals via `revealLog`.
    */
   redacted: boolean;
+}
+
+/** One stage of a request on the trace waterfall. Timings are microseconds. */
+export interface TraceSpan {
+  name: string;
+  /** gateway | policy | cache | network | wait | failed | tools | write */
+  category: string;
+  /** Offset from the request start. */
+  start_us: number;
+  dur_us: number;
+  /** Nesting level for the waterfall's indentation (0 = request root). */
+  depth: number;
+  /** Short outcome chip — "429", "hit", "first token". */
+  outcome?: string | null;
+  detail?: string | null;
 }
 
 /** Column the log list can be sorted by (GET /api/logs `sort_by`). */

@@ -37,6 +37,13 @@ Unknown top-level keys are ignored. Every field is optional except where noted; 
 | `cors_allow_origins` | [string]? | *none* (permissive) | Explicit CORS allow-list. When unset or empty, any origin is allowed (fine for local dev; set it in production). |
 | `log_retention_days` | u32? | *none* (kept forever) | When set and > 0, a background sweep deletes logs older than this (hourly, first sweep at startup). Re-read from live config, so hot-reload needs no restart. |
 | `content_logging` | [ContentLoggingConfig](#contentloggingconfig)? | *none* (off) | Opt-in request/response **body** capture (M10 Phase 2). Bodies are admin-only. |
+
+> **Request tracing needs no configuration.** Every request records per-stage trace spans
+> (governance, cache, each dispatch attempt, time-to-first-token, stream body) that power the
+> dashboard's call waterfall. Unlike content capture there is nothing to opt into: spans hold
+> only stage names, timings, and outcomes — never request content — so they carry no
+> disclosure risk. They add roughly 300–600 bytes per audit row and are returned **only** by
+> `GET /api/logs/{id}`, never on list or live-tail responses.
 | `redaction` | [RedactionConfig](#redactionconfig)? | *none* (off) | Reversible redaction of captured bodies (M11). |
 | `otlp` | [OtlpConfig](#otlpconfig)? | *none* (off) | OTLP/OpenTelemetry export of traces + metrics (M15). |
 

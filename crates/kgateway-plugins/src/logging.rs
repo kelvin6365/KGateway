@@ -98,6 +98,14 @@ impl LoggingPlugin {
             error_message: record.error_message.clone(),
             request_body: record.request_body.clone(),
             response_body: record.response_body.clone(),
+            // Trace spans for the call waterfall. Serialization failure is not worth
+            // failing an audit row over — the request still gets logged, just without
+            // its trace.
+            spans: if ctx.spans.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&ctx.spans.snapshot()).ok()
+            },
             // Redaction is applied post-build (needs the redactor); defaults here.
             redacted: false,
             redaction_mapping: None,
@@ -152,13 +160,15 @@ impl RequestObserver for LoggingPlugin {
         self.apply_redaction(&mut log);
         // Publish to the live tail first (cheap, in-memory) so subscribers see it even
         // if the durable write is slow; ignore the error (no subscribers). The SSE tail
-        // mirrors the lean LIST contract — captured request/response bodies are NEVER
-        // broadcast (they'd bypass the admin-only detail gate); they go only to the
-        // durable store, readable via GET /api/logs/{id}.
+        // mirrors the lean LIST contract — captured request/response bodies and trace
+        // spans are NEVER broadcast (bodies would bypass the admin-only detail gate;
+        // spans would bloat every live-tail frame); they go only to the durable store,
+        // readable via GET /api/logs/{id}.
         if let Some(tx) = &self.tx {
             let lean = RequestLog {
                 request_body: None,
                 response_body: None,
+                spans: None,
                 ..log.clone()
             };
             let _ = tx.send(lean);

@@ -19,6 +19,7 @@ use crate::router::{ProviderEntry, Registry};
 use crate::schema::{
     ChatRequest, ChatResponse, Delta, Message, Role, StreamChoice, StreamChunk, ToolCallAccumulator,
 };
+use crate::trace::SpanCategory;
 use futures::StreamExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -39,6 +40,52 @@ pub const MAX_FALLBACKS: usize = 5;
 /// per-provider concurrency permit so a hung upstream can't pin capacity indefinitely.
 /// Generous enough to tolerate real time-to-first-token latency on large prompts.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Below this, a concurrency permit was effectively uncontended — recording it would
+/// add a noise row to every trace without telling the operator anything.
+const SEMAPHORE_WAIT_SPAN_FLOOR: std::time::Duration = std::time::Duration::from_micros(200);
+
+/// Which colour band a plugin's span belongs to. Cache plugins get their own band
+/// because "did the cache save us a call?" is the question traces are read for.
+fn plugin_category(plugin_name: &str) -> SpanCategory {
+    if plugin_name.contains("cache") {
+        SpanCategory::Cache
+    } else {
+        SpanCategory::Gateway
+    }
+}
+
+/// Record one plugin's `pre_llm` stage. Shared by `chat` and `chat_stream` so the two
+/// paths can't drift into describing the same pipeline differently.
+fn record_pre_llm_span(
+    ctx: &Ctx,
+    plugin_name: &str,
+    at: std::time::Instant,
+    outcome: &Result<PreOutcome, KgError>,
+) {
+    let (chip, detail) = match outcome {
+        Ok(PreOutcome::ShortCircuit(_)) => (
+            Some("hit".to_string()),
+            Some("Served here — no upstream call was made.".to_string()),
+        ),
+        Ok(PreOutcome::Reject(e)) => (Some("rejected".to_string()), Some(e.message.clone())),
+        Err(e) => (
+            Some("error".to_string()),
+            // Plugin errors are non-blocking by design; say so, or the trace looks broken.
+            Some(format!("{} (non-blocking — request continued)", e.message)),
+        ),
+        Ok(PreOutcome::Continue(_)) => (None, None),
+    };
+    ctx.span_at(
+        at,
+        at.elapsed(),
+        format!("{plugin_name}.pre_llm"),
+        plugin_category(plugin_name),
+        1,
+        chip,
+        detail,
+    );
+}
 
 /// Exponential backoff with ±20% jitter between retry attempts. Base doubles per attempt,
 /// capped; jitter de-synchronizes retries from many concurrent requests (thundering herd).
@@ -139,6 +186,13 @@ struct StreamCaptureGuard {
     status: u16,
     /// Upstream error detail if the stream errored.
     error_message: Option<String>,
+    /// Shared handle to the request's trace spans. The guard emits the audit record
+    /// after the borrow of `Ctx` is gone, so it holds the collector itself rather than
+    /// a snapshot — spans recorded late (mid-stream) still land on the record.
+    spans: Arc<crate::trace::SpanCollector>,
+    /// When the first chunk reached the client, so the guard can split the stream into
+    /// time-to-first-token and body-transfer time on the trace.
+    first_chunk_at: Option<std::time::Instant>,
     emitted: bool,
 }
 
@@ -193,6 +247,12 @@ impl StreamCaptureGuard {
         self.completion_tokens = usage.completion_tokens;
     }
 
+    /// Stamp the first chunk's arrival. Called for every chunk; only the first matters.
+    fn note_chunk(&mut self) {
+        self.first_chunk_at
+            .get_or_insert_with(std::time::Instant::now);
+    }
+
     /// Note an error observed while consuming the stream, so the deferred record reflects
     /// the real outcome instead of a blanket 200.
     fn note_error(&mut self, e: &KgError) {
@@ -223,6 +283,21 @@ impl Drop for StreamCaptureGuard {
         let request_id = self.request_id;
         let virtual_key = self.virtual_key.take();
         let started_at = self.started_at;
+        let spans = self.spans.clone();
+        // Split the stream into TTFT (already recorded at dispatch) and body transfer, so
+        // "the model thought for 4 s" reads differently from "the body took 4 s".
+        if let Some(first) = self.first_chunk_at {
+            spans.record_detailed(
+                self.started_at,
+                first,
+                first.elapsed(),
+                "stream.body",
+                crate::trace::SpanCategory::Network,
+                1,
+                None,
+                Some("First chunk to end of stream.".into()),
+            );
+        }
         let mut rec = cap_record(
             &self.model_full,
             self.status,
@@ -255,6 +330,7 @@ impl Drop for StreamCaptureGuard {
             c.request_id = request_id;
             c.virtual_key = virtual_key;
             c.started_at = started_at;
+            c.spans = spans;
             for o in &observers {
                 o.on_response(&c, &rec).await;
             }
@@ -320,7 +396,20 @@ impl Kgateway {
     /// Run all observers' pre-flight checks. Returns the first rejection.
     async fn observe_check(&self, ctx: &Ctx, model: &str) -> Result<(), KgError> {
         for o in &self.observers {
-            o.on_request(ctx, model).await?;
+            let at = std::time::Instant::now();
+            let outcome = o.on_request(ctx, model).await;
+            // Named per observer so a slow governance store is distinguishable from a
+            // slow telemetry exporter on the waterfall.
+            ctx.span_at(
+                at,
+                at.elapsed(),
+                format!("{}.check", o.name()),
+                SpanCategory::Policy,
+                1,
+                outcome.as_ref().err().map(|_| "rejected".to_string()),
+                outcome.as_ref().err().map(|e| e.message.clone()),
+            );
+            outcome?;
         }
         Ok(())
     }
@@ -382,7 +471,10 @@ impl Kgateway {
         // to restore on error.
         for p in &self.llm_plugins {
             let snapshot = req.clone();
-            match p.pre_llm(ctx, req).await {
+            let at = std::time::Instant::now();
+            let outcome = p.pre_llm(ctx, req).await;
+            record_pre_llm_span(ctx, p.name(), at, &outcome);
+            match outcome {
                 Ok(PreOutcome::Continue(r)) => req = r,
                 Ok(PreOutcome::ShortCircuit(resp)) => {
                     // A pre_llm short-circuit means the semantic cache served this.
@@ -558,9 +650,40 @@ impl Kgateway {
             // Backoff before every attempt after the first — a 429 especially means "slow
             // down", so hammering the next key immediately is counterproductive.
             if attempt > 0 {
+                let at = std::time::Instant::now();
                 tokio::time::sleep(backoff_delay(attempt as u32, rng)).await;
+                ctx.span_at(
+                    at,
+                    at.elapsed(),
+                    "backoff + jitter",
+                    SpanCategory::Wait,
+                    1,
+                    None,
+                    Some("Exponential backoff before retrying on the next key.".into()),
+                );
             }
-            match self.call_provider(entry, chosen, ctx, req.clone()).await {
+            let at = std::time::Instant::now();
+            let call = self.call_provider(entry, chosen, ctx, req.clone()).await;
+            // One span per attempt, named by provider + key, so a failover chain reads as
+            // the sequence of tries it actually was rather than a single opaque total.
+            ctx.span_at(
+                at,
+                at.elapsed(),
+                format!("attempt · {provider_key} key={}", chosen.id),
+                if call.is_ok() {
+                    SpanCategory::Network
+                } else {
+                    SpanCategory::Failed
+                },
+                1,
+                call.as_ref().err().map(|e| {
+                    e.status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "error".into())
+                }),
+                call.as_ref().err().map(|e| e.message.clone()),
+            );
+            match call {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
                     // Rotate to another key on per-key failures (incl. 401/402/403), not just
@@ -587,13 +710,43 @@ impl Kgateway {
         ctx: &Ctx,
         req: ChatRequest,
     ) -> Result<ChatResponse, KgError> {
+        let queued_at = std::time::Instant::now();
         let _permit = entry
             .concurrency
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| KgError::internal("provider concurrency semaphore closed"))?;
-        entry.provider.chat(ctx, key, req).await
+        // Only worth a row when the request actually waited — an uncontended permit is
+        // sub-microsecond noise that would clutter every trace.
+        let queued = queued_at.elapsed();
+        if queued >= SEMAPHORE_WAIT_SPAN_FLOOR {
+            ctx.span_at(
+                queued_at,
+                queued,
+                "semaphore.acquire",
+                SpanCategory::Wait,
+                2,
+                Some("queued".into()),
+                Some("Waited for a per-provider concurrency permit.".into()),
+            );
+        }
+        let at = std::time::Instant::now();
+        let out = entry.provider.chat(ctx, key, req).await;
+        ctx.span_at(
+            at,
+            at.elapsed(),
+            "http.request",
+            if out.is_ok() {
+                SpanCategory::Network
+            } else {
+                SpanCategory::Failed
+            },
+            2,
+            None,
+            None,
+        );
+        out
     }
 
     /// Resolve a `provider/model` string to its registered entry, a weighted-selected
@@ -846,7 +999,10 @@ impl Kgateway {
         // emitted as a one-shot stream so streaming clients can't bypass the hook.
         for p in &self.llm_plugins {
             let snapshot = req.clone();
-            match p.pre_llm(ctx, req).await {
+            let at = std::time::Instant::now();
+            let outcome = p.pre_llm(ctx, req).await;
+            record_pre_llm_span(ctx, p.name(), at, &outcome);
+            match outcome {
                 Ok(PreOutcome::Continue(r)) => req = r,
                 Ok(PreOutcome::ShortCircuit(resp)) => {
                     // A streaming cache hit is still audited + governed (mirrors `chat`),
@@ -909,6 +1065,8 @@ impl Kgateway {
             stop_reason: None,
             status: 200,
             error_message: None,
+            spans: ctx.spans.clone(),
+            first_chunk_at: None,
             emitted: false,
         };
 
@@ -922,6 +1080,7 @@ impl Kgateway {
                     Ok(Some(item)) => {
                         match &item {
                             Ok(chunk) => {
+                                guard.note_chunk();
                                 if let Some(u) = &chunk.usage {
                                     guard.note_usage(u);
                                 }
@@ -1026,19 +1185,56 @@ impl Kgateway {
                 break;
             };
             if attempt > 0 {
+                let at = std::time::Instant::now();
                 tokio::time::sleep(backoff_delay(attempt as u32, rng)).await;
+                ctx.span_at(
+                    at,
+                    at.elapsed(),
+                    "backoff + jitter",
+                    SpanCategory::Wait,
+                    1,
+                    None,
+                    Some("Exponential backoff before retrying on the next key.".into()),
+                );
             }
+            let attempt_at = std::time::Instant::now();
             // Acquire the permit before opening; hold it on success, drop on failure so a
             // failed attempt never leaks a permit.
+            let queued_at = std::time::Instant::now();
             let permit = match entry.concurrency.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return Err(KgError::internal("provider concurrency semaphore closed")),
             };
+            let queued = queued_at.elapsed();
+            if queued >= SEMAPHORE_WAIT_SPAN_FLOOR {
+                ctx.span_at(
+                    queued_at,
+                    queued,
+                    "semaphore.acquire",
+                    SpanCategory::Wait,
+                    2,
+                    Some("queued".into()),
+                    Some("Waited for a per-provider concurrency permit.".into()),
+                );
+            }
             let opened = entry.provider.chat_stream(ctx, chosen, req.clone()).await;
             let mut stream = match opened {
                 Ok(s) => s,
                 Err(e) => {
                     drop(permit);
+                    ctx.span_at(
+                        attempt_at,
+                        attempt_at.elapsed(),
+                        format!("attempt · {provider_key} key={}", chosen.id),
+                        SpanCategory::Failed,
+                        1,
+                        Some(
+                            e.status
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "error".into()),
+                        ),
+                        Some(e.message.clone()),
+                    );
                     let rotatable = e.is_key_rotatable();
                     last_err = e;
                     if !rotatable {
@@ -1052,6 +1248,17 @@ impl Kgateway {
             // event; catching it here lets us fail over before the client sees anything.
             match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
                 Ok(Some(Ok(first))) => {
+                    // Time to first token: the number that decides whether a stream *feels*
+                    // fast, and the one a single total-latency figure hides completely.
+                    ctx.span_at(
+                        attempt_at,
+                        attempt_at.elapsed(),
+                        format!("stream.ttft · {provider_key} key={}", chosen.id),
+                        SpanCategory::Network,
+                        1,
+                        Some("first token".into()),
+                        Some("Open + time to first chunk. Failover happens before this point, so the client never sees a retry.".into()),
+                    );
                     let rest = futures::stream::once(async move { Ok(first) })
                         .chain(stream)
                         .boxed();
@@ -1523,6 +1730,144 @@ mod tests {
         );
         assert_eq!(ctx.attempt, 2, "primary + one fallback = 2 attempts");
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn trace_records_each_failover_attempt_with_its_status() {
+        // The trace's whole purpose: show that the 503 attempt happened and cost time,
+        // instead of reporting one opaque total for a request that looks like a success.
+        let mut registry = Registry::new();
+        let (primary, _) = FakeProvider::new("openai", Behavior::AlwaysErr(503));
+        let (fb, _) = FakeProvider::new("anthropic", Behavior::AlwaysOk("from fallback"));
+        registry.register(primary, vec![key("k1")]);
+        registry.register(fb, vec![key("k2")]);
+        let engine = Kgateway::new(registry);
+
+        let mut r = req();
+        r.fallbacks = vec![Fallback {
+            provider: "anthropic".into(),
+            model: "m".into(),
+        }];
+
+        let mut ctx = Ctx::new();
+        engine.chat(&mut ctx, r).await.expect("fallback succeeds");
+
+        let spans = ctx.spans.snapshot();
+        let attempts: Vec<_> = spans
+            .iter()
+            .filter(|s| s.name.starts_with("attempt ·"))
+            .collect();
+        assert_eq!(attempts.len(), 2, "one span per attempt: {spans:#?}");
+
+        assert_eq!(attempts[0].category, SpanCategory::Failed);
+        assert_eq!(attempts[0].outcome.as_deref(), Some("503"));
+        assert!(attempts[0].name.contains("openai"));
+        assert!(
+            attempts[0].name.contains("key=k1"),
+            "key id identifies which credential failed"
+        );
+
+        assert_eq!(attempts[1].category, SpanCategory::Network);
+        assert_eq!(
+            attempts[1].outcome, None,
+            "the successful attempt carries no error chip"
+        );
+        assert!(attempts[1].name.contains("anthropic"));
+
+        // Timeline order: the failed attempt must precede the fallback that replaced it.
+        assert!(attempts[0].start_us <= attempts[1].start_us);
+    }
+
+    #[tokio::test]
+    async fn trace_survives_into_a_streamed_request_s_audit_record() {
+        // Regression: the deferred stream guard rebuilds a `Ctx` to emit the audit record
+        // after the borrow is gone. It once built a FRESH collector, so every streamed
+        // request logged an empty trace while unary requests traced fine.
+        use crate::observer::CallRecord;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct SpanCapturingObserver {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl RequestObserver for SpanCapturingObserver {
+            fn name(&self) -> &str {
+                "span-capture"
+            }
+            async fn on_response(&self, ctx: &Ctx, _rec: &CallRecord) {
+                *self.seen.lock().unwrap() =
+                    ctx.spans.snapshot().into_iter().map(|s| s.name).collect();
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = Registry::new();
+        registry.register(Arc::new(StreamProvider), vec![key("k")]);
+        let engine = Kgateway::new(registry)
+            .with_observer(Arc::new(SpanCapturingObserver { seen: seen.clone() }));
+
+        let mut ctx = Ctx::new();
+        let stream = engine
+            .chat_stream(&mut ctx, req())
+            .await
+            .expect("stream opens");
+        // Drain, then drop, so the deferred guard fires.
+        let _: Vec<_> = stream.collect().await;
+        // The guard emits on a detached task; yield until it lands.
+        for _ in 0..50 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let names = seen.lock().unwrap().clone();
+        assert!(
+            names.iter().any(|n| n.starts_with("stream.ttft")),
+            "the streamed audit record must carry the trace, incl. time-to-first-token: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trace_marks_a_cache_short_circuit_as_a_hit() {
+        // A cache hit should read as "served here, no upstream call" — the fast-path trace.
+        struct CachePlugin;
+        #[async_trait]
+        impl Plugin for CachePlugin {
+            fn name(&self) -> &str {
+                "semantic_cache"
+            }
+        }
+        #[async_trait]
+        impl LlmPlugin for CachePlugin {
+            async fn pre_llm(&self, _ctx: &Ctx, _req: ChatRequest) -> Result<PreOutcome, KgError> {
+                Ok(PreOutcome::ShortCircuit(ok_response(
+                    "cached",
+                    "from cache",
+                )))
+            }
+        }
+
+        let engine = Kgateway::new(registry_with_ok_provider()).with_plugin(Arc::new(CachePlugin));
+        let mut ctx = Ctx::new();
+        engine.chat(&mut ctx, req()).await.expect("cache serves it");
+
+        let spans = ctx.spans.snapshot();
+        let hit = spans
+            .iter()
+            .find(|s| s.name == "semantic_cache.pre_llm")
+            .expect("cache span recorded");
+        assert_eq!(
+            hit.category,
+            SpanCategory::Cache,
+            "cache gets its own colour band"
+        );
+        assert_eq!(hit.outcome.as_deref(), Some("hit"));
+        assert!(
+            !spans.iter().any(|s| s.name.starts_with("attempt ·")),
+            "a short-circuit must not record an upstream attempt: {spans:#?}"
+        );
     }
 
     #[tokio::test]

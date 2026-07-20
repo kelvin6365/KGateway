@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
     error_message     TEXT,
     request_body      TEXT,
     response_body     TEXT,
+    spans             TEXT,
     redacted          INTEGER NOT NULL DEFAULT 0,
     redaction_mapping TEXT
 )";
@@ -52,6 +53,7 @@ const MIGRATE_COLUMNS: &[&str] = &[
     "ALTER TABLE request_logs ADD COLUMN response_body TEXT",
     "ALTER TABLE request_logs ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE request_logs ADD COLUMN redaction_mapping TEXT",
+    "ALTER TABLE request_logs ADD COLUMN spans TEXT",
 ];
 
 impl From<sqlx::Error> for StoreError {
@@ -115,6 +117,7 @@ struct RequestLogRow {
     // Populated only by the detail (`get`) query; list queries select these as NULL.
     request_body: Option<String>,
     response_body: Option<String>,
+    spans: Option<String>,
     redacted: i64,
     // Populated only by the detail query; list selects NULL.
     redaction_mapping: Option<String>,
@@ -142,6 +145,7 @@ impl From<RequestLogRow> for RequestLog {
             error_message: r.error_message,
             request_body: r.request_body,
             response_body: r.response_body,
+            spans: r.spans,
             redacted: r.redacted != 0,
             redaction_mapping: r.redaction_mapping,
         }
@@ -153,25 +157,25 @@ impl From<RequestLogRow> for RequestLog {
 const LIST_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, CAST(NULL AS TEXT) AS request_body, CAST(NULL AS TEXT) AS response_body, \
-     redacted, CAST(NULL AS TEXT) AS redaction_mapping";
+     CAST(NULL AS TEXT) AS spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Detail column list: captured bodies + `redacted`, but the encrypted mapping is NULLed
 /// (loaded only by the reveal query, not ordinary detail reads).
 const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
-     error_message, request_body, response_body, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
+     error_message, request_body, response_body, spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Reveal column list: everything including the encrypted mapping. Used ONLY by
 /// `get_with_mapping` behind the `logs:reveal` gate.
 const REVEAL_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
-     error_message, request_body, response_body, redacted, redaction_mapping";
+     error_message, request_body, response_body, spans, redacted, redaction_mapping";
 
 const INSERT_SQL: &str = "INSERT INTO request_logs \
      (request_id, created_at, virtual_key, provider, model, status, prompt_tokens, \
       completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, error_message, \
-      request_body, response_body, redacted, redaction_mapping) \
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      request_body, response_body, spans, redacted, redaction_mapping) \
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Build the bound INSERT for one log. Shared by `append` (single) and `append_batch`
 /// (transaction), so both stay in lock-step with the column list. Bound values are owned,
@@ -199,6 +203,7 @@ fn insert_query(
         .bind(log.error_message)
         .bind(log.request_body)
         .bind(log.response_body)
+        .bind(log.spans)
         .bind(log.redacted as i64)
         .bind(log.redaction_mapping)
 }
@@ -296,6 +301,7 @@ mod tests {
             error_message: None,
             request_body: Some(r#"{"messages":[{"role":"user","content":"hi"}]}"#.to_string()),
             response_body: Some(r#"{"content":"hello"}"#.to_string()),
+            spans: None,
             redacted: false,
             redaction_mapping: None,
         }
@@ -442,5 +448,31 @@ mod tests {
             Some(r#"{"messages":[{"role":"user","content":"hi"}]}"#)
         );
         assert_eq!(got.response_body.as_deref(), Some(r#"{"content":"hello"}"#));
+    }
+
+    #[tokio::test]
+    async fn spans_round_trip_on_detail_but_are_stripped_from_list() {
+        // Traces follow the captured-body contract: a list of 200 rows must not drag
+        // every row's waterfall along with it.
+        let store = SqliteLogStore::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let trace = r#"[{"name":"attempt · zai","category":"failed","start_us":128000,"dur_us":440000,"depth":1,"outcome":"429"}]"#;
+        let mut log = sample("req-trace", 5);
+        log.spans = Some(trace.to_string());
+        store.append(log).await.expect("append");
+
+        let listed = store.recent(10).await.expect("recent");
+        assert!(
+            listed[0].spans.is_none(),
+            "spans must not ride along on the list path"
+        );
+
+        let got = store.get("req-trace").await.expect("get").expect("some");
+        assert_eq!(
+            got.spans.as_deref(),
+            Some(trace),
+            "detail read returns the trace verbatim"
+        );
     }
 }
