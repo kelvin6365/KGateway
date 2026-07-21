@@ -18,7 +18,9 @@ use async_trait::async_trait;
 use kgateway_core::context::Ctx;
 use kgateway_core::error::{KgError, KgErrorKind};
 use kgateway_core::provider::{ApiKey, ChunkStream, Provider, ProviderKey};
-use kgateway_core::schema::{ChatRequest, ChatResponse, Choice, Message, Role, Usage};
+use kgateway_core::schema::{
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, Role, Usage,
+};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -62,8 +64,8 @@ impl GeminiProvider {
         for m in &req.messages {
             match m.role {
                 Role::System => {
-                    if let Some(c) = &m.content {
-                        system_parts.push(GeminiPart { text: c.clone() });
+                    if let Some(t) = m.content.as_ref().and_then(|c| c.to_text()) {
+                        system_parts.push(GeminiPart { text: t });
                     }
                 }
                 // Gemini has no "system" or "tool" role in the turn array; tool
@@ -72,14 +74,14 @@ impl GeminiProvider {
                 Role::User | Role::Tool => contents.push(GeminiContent {
                     role: "user".into(),
                     parts: vec![GeminiPart {
-                        text: m.content.clone().unwrap_or_default(),
+                        text: m.text_or_empty(),
                     }],
                 }),
                 // Gemini's assistant-equivalent role is "model", not "assistant".
                 Role::Assistant => contents.push(GeminiContent {
                     role: "model".into(),
                     parts: vec![GeminiPart {
-                        text: m.content.clone().unwrap_or_default(),
+                        text: m.text_or_empty(),
                     }],
                 }),
             }
@@ -272,7 +274,7 @@ impl GeminiResponse {
                 index: 0,
                 message: Message {
                     role: Role::Assistant,
-                    content,
+                    content: content.map(MessageContent::Text),
                     name: None,
                     tool_calls: vec![],
                     tool_call_id: None,
@@ -393,10 +395,7 @@ mod tests {
         assert_eq!(out.object, "chat.completion");
         assert_eq!(out.model, "gemini-1.5-pro");
         assert_eq!(out.choices.len(), 1);
-        assert_eq!(
-            out.choices[0].message.content.as_deref(),
-            Some("Hello, world!")
-        );
+        assert_eq!(out.choices[0].message.text_content(), Some("Hello, world!"));
         assert_eq!(out.choices[0].message.role, Role::Assistant);
         assert_eq!(out.choices[0].finish_reason.as_deref(), Some("STOP"));
         assert_eq!(out.usage.prompt_tokens, 12);

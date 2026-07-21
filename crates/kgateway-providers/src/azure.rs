@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(resp.id, "chatcmpl-abc123");
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(
-            resp.choices[0].message.content.as_deref(),
+            resp.choices[0].message.text_content(),
             Some("Hello from Azure!")
         );
         assert_eq!(resp.usage.total_tokens, 15);

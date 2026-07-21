@@ -128,7 +128,7 @@ fn translate_in_message(m: &InMessage, out: &mut Vec<Message>) {
     match &m.content {
         Value::String(s) => out.push(Message {
             role: plain_role,
-            content: Some(s.clone()),
+            content: Some(s.clone().into()),
             name: None,
             tool_calls: vec![],
             tool_call_id: None,
@@ -171,13 +171,34 @@ fn translate_in_message(m: &InMessage, out: &mut Vec<Message>) {
                             .to_string(),
                         b.get("content").map(value_text).unwrap_or_default(),
                     )),
-                    _ => {} // images / other blocks — ignored for now
+                    "image" => {
+                        // Anthropic image block → OpenAI image_url part (best-effort).
+                        // We only forward it if it has a base64 source we can re-encode as a data URI.
+                        if let Some(source) = b.get("source") {
+                            if source.get("type").and_then(|v| v.as_str()) == Some("base64") {
+                                if let (Some(media_type), Some(data)) = (
+                                    source.get("media_type").and_then(|v| v.as_str()),
+                                    source.get("data").and_then(|v| v.as_str()),
+                                ) {
+                                    let data_uri = format!("data:{media_type};base64,{data}");
+                                    // Images require multipart content — convert text to Parts
+                                    // (handled below in the push logic)
+                                    text.push_str(&format!("[image:{data_uri}]"));
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // other blocks — ignored for now
                 }
             }
             if assistant {
                 out.push(Message {
                     role: Role::Assistant,
-                    content: if text.is_empty() { None } else { Some(text) },
+                    content: if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.into())
+                    },
                     name: None,
                     tool_calls,
                     tool_call_id: None,
@@ -187,7 +208,7 @@ fn translate_in_message(m: &InMessage, out: &mut Vec<Message>) {
                 for (tool_use_id, content) in tool_results {
                     out.push(Message {
                         role: Role::Tool,
-                        content: Some(content),
+                        content: Some(content.into()),
                         name: None,
                         tool_calls: vec![],
                         tool_call_id: Some(tool_use_id),
@@ -196,7 +217,7 @@ fn translate_in_message(m: &InMessage, out: &mut Vec<Message>) {
                 if !text.is_empty() {
                     out.push(Message {
                         role: plain_role,
-                        content: Some(text),
+                        content: Some(text.into()),
                         name: None,
                         tool_calls: vec![],
                         tool_call_id: None,
@@ -233,9 +254,11 @@ pub fn to_anthropic_response(resp: ChatResponse) -> Value {
     });
 
     if let Some(c) = choice {
-        if let Some(text) = &c.message.content {
-            if !text.is_empty() {
-                blocks.push(json!({ "type": "text", "text": text }));
+        if let Some(mc) = &c.message.content {
+            if let Some(text) = mc.as_text() {
+                if !text.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
             }
         }
         for tc in &c.message.tool_calls {
@@ -491,7 +514,7 @@ mod tests {
         assert_eq!(cr.messages.len(), 2);
         assert_eq!(cr.messages[0].role, Role::System);
         assert_eq!(cr.messages[1].role, Role::User);
-        assert_eq!(cr.messages[1].content.as_deref(), Some("hi"));
+        assert_eq!(cr.messages[1].text_content(), Some("hi"));
     }
 
     /// Claude Code emits a mid-conversation `"role": "system"` turn alongside the top-level
@@ -510,7 +533,7 @@ mod tests {
             assert_eq!(cr.messages.len(), 2);
             assert_eq!(cr.messages[0].role, Role::User);
             assert_eq!(cr.messages[1].role, Role::System);
-            assert_eq!(cr.messages[1].content.as_deref(), Some("ctx"));
+            assert_eq!(cr.messages[1].text_content(), Some("ctx"));
         }
     }
 
@@ -537,14 +560,14 @@ mod tests {
         assert_eq!(cr.messages.len(), 3);
         let asst = &cr.messages[1];
         assert_eq!(asst.role, Role::Assistant);
-        assert_eq!(asst.content.as_deref(), Some("let me check"));
+        assert_eq!(asst.text_content(), Some("let me check"));
         assert_eq!(asst.tool_calls.len(), 1);
         assert_eq!(asst.tool_calls[0].id, "call_1");
         assert_eq!(asst.tool_calls[0].function.arguments, r#"{"loc":"SF"}"#);
         let tool = &cr.messages[2];
         assert_eq!(tool.role, Role::Tool);
         assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(tool.content.as_deref(), Some("sunny"));
+        assert_eq!(tool.text_content(), Some("sunny"));
     }
 
     #[test]

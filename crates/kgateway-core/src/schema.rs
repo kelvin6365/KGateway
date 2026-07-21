@@ -16,11 +16,109 @@ pub enum Role {
     Tool,
 }
 
+/// Polymorphic message content. On the wire, `content` is either a plain string
+/// (text-only) or an array of content parts (multimodal: text, image_url, etc.).
+/// This mirrors the OpenAI Chat Completions API exactly.
+///
+/// Serialization rule:
+/// - `Text(s)` → `"s"` (a JSON string)
+/// - `Parts([...])` → `[{...}, {...}]` (a JSON array)
+///
+/// Deserialization accepts both shapes. A `null` content deserializes to `None`
+/// at the `Message` level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text — the common case. Serializes as a JSON string.
+    Text(String),
+    /// Array of typed content parts (text, image_url, etc.).
+    /// Serializes as a JSON array.
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract the plain-text value if this is a `Text` variant.
+    /// Returns `None` for `Parts` (multimodal content has no single text value).
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(s) => Some(s),
+            MessageContent::Parts(_) => None,
+        }
+    }
+
+    /// Extract text from any content shape: `Text(s)` returns `s`, `Parts` returns
+    /// the concatenation of all `text`-typed parts. Useful for logging, caching,
+    /// and other places that need a best-effort string representation.
+    pub fn to_text(&self) -> Option<String> {
+        match self {
+            MessageContent::Text(s) => Some(s.clone()),
+            MessageContent::Parts(parts) => {
+                let texts: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if texts.is_empty() {
+                    None
+                } else {
+                    Some(texts.join(""))
+                }
+            }
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        MessageContent::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        MessageContent::Text(s.to_string())
+    }
+}
+
+/// One part of a multipart message content. Supports text and image_url
+/// (the two OpenAI content part types). Unknown part types are preserved
+/// via the `Other` variant so they survive the gateway's deserialize→reserialize
+/// round-trip without being dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ContentPart {
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+    /// Any content part type we don't explicitly model (e.g. `input_audio`,
+    /// `file`, proprietary extensions). Preserved verbatim.
+    #[serde(other)]
+    Other,
+}
+
+/// OpenAI `image_url` content part shape. The `url` can be a data URI
+/// (`data:image/png;base64,...`) or a public HTTPS URL. `detail` is optional
+/// (`low` | `high` | `auto`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// Either a public URL or a `data:` URI with base64-encoded image data.
+    pub url: String,
+    /// Optional fidelity hint: `"low"`, `"high"`, or `"auto"` (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -30,7 +128,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn user(content: impl Into<String>) -> Self {
+    pub fn user(content: impl Into<MessageContent>) -> Self {
         Self {
             role: Role::User,
             content: Some(content.into()),
@@ -39,7 +137,7 @@ impl Message {
             tool_call_id: None,
         }
     }
-    pub fn system(content: impl Into<String>) -> Self {
+    pub fn system(content: impl Into<MessageContent>) -> Self {
         Self {
             role: Role::System,
             content: Some(content.into()),
@@ -47,6 +145,20 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
         }
+    }
+
+    /// Convenience: get the content as a plain text string if it is text-only.
+    /// Returns `None` for multipart/multimodal content.
+    pub fn text_content(&self) -> Option<&str> {
+        self.content.as_ref()?.as_text()
+    }
+
+    /// Best-effort text extraction from any content shape.
+    pub fn text_or_empty(&self) -> String {
+        self.content
+            .as_ref()
+            .and_then(|c| c.to_text())
+            .unwrap_or_default()
     }
 }
 
@@ -397,6 +509,99 @@ mod tests {
         assert!(
             !out.contains("tool_calls"),
             "no empty array on the wire: {out}"
+        );
+    }
+
+    // ---- Multimodal content tests ----
+
+    #[test]
+    fn plain_string_content_deserializes() {
+        let msg: Message = serde_json::from_str(r#"{"role":"user","content":"Hello world"}"#)
+            .expect("plain string content parses");
+        assert_eq!(msg.text_content(), Some("Hello world"));
+        // Round-trip: should serialize back as a string, not an array.
+        let out = serde_json::to_string(&msg).unwrap();
+        assert!(
+            out.contains("\"content\":\"Hello world\""),
+            "should serialize as string: {out}"
+        );
+    }
+
+    #[test]
+    fn multipart_text_content_deserializes() {
+        let msg: Message =
+            serde_json::from_str(r#"{"role":"user","content":[{"type":"text","text":"Hello"}]}"#)
+                .expect("multipart text content parses");
+        // to_text should extract the text
+        assert_eq!(
+            msg.content.as_ref().unwrap().to_text().as_deref(),
+            Some("Hello")
+        );
+        // text_content returns None because it's Parts, not Text
+        assert_eq!(msg.text_content(), None);
+    }
+
+    #[test]
+    fn image_url_content_deserializes() {
+        let msg: Message = serde_json::from_str(
+            r#"{"role":"user","content":[
+                {"type":"text","text":"What's in this image?"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR...","detail":"high"}}
+            ]}"#,
+        )
+        .expect("image_url content parses");
+
+        // Verify it round-trips through the gateway's serialize→deserialize cycle
+        let wire = serde_json::to_string(&msg).unwrap();
+        let msg2: Message = serde_json::from_str(&wire).unwrap();
+
+        // Text extraction should return just the text parts
+        assert_eq!(
+            msg2.content.as_ref().unwrap().to_text().as_deref(),
+            Some("What's in this image?")
+        );
+    }
+
+    #[test]
+    fn null_content_deserializes_as_none() {
+        let msg: Message =
+            serde_json::from_str(r#"{"role":"assistant","content":null}"#).expect("null content");
+        assert!(msg.content.is_none());
+    }
+
+    #[test]
+    fn absent_content_defaults_to_none() {
+        let msg: Message = serde_json::from_str(r#"{"role":"assistant"}"#).expect("absent content");
+        assert!(msg.content.is_none());
+    }
+
+    #[test]
+    fn multimodal_message_survives_full_roundtrip() {
+        let json = r#"{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).expect("parses");
+        let wire = serde_json::to_string(&msg).expect("serializes");
+        assert!(wire.contains("image_url"), "image_url must survive: {wire}");
+        assert!(wire.contains("example.com"), "url must survive: {wire}");
+    }
+
+    #[test]
+    fn unknown_content_part_preserved() {
+        // A content part type we don't model should survive the round-trip via the Other variant
+        let json = r#"{"role":"user","content":[
+            {"type":"text","text":"hello"},
+            {"type":"input_audio","input_audio":{"data":"base64...","format":"wav"}}
+        ]}"#;
+        let msg: Message = serde_json::from_str(json).expect("parses with unknown part");
+        // Text extraction should still get the text part
+        assert_eq!(
+            msg.content.as_ref().unwrap().to_text().as_deref(),
+            Some("hello")
         );
     }
 }

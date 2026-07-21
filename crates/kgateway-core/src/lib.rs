@@ -18,5 +18,8 @@ pub use context::Ctx;
 pub use error::{KgError, KgErrorKind};
 pub use plugin::{LlmPlugin, Plugin, PreOutcome};
 pub use provider::{ApiKey, Provider, ProviderKey};
-pub use schema::{ChatRequest, ChatResponse, Message, Role, StreamChunk, Usage};
+pub use schema::{
+    ChatRequest, ChatResponse, ContentPart, ImageUrl, Message, MessageContent, Role, StreamChunk,
+    Usage,
+};
 pub use trace::{Span, SpanCategory, SpanCollector};

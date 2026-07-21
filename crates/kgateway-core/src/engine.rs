@@ -588,7 +588,7 @@ impl Kgateway {
                 let result = outcome.unwrap_or_else(|e| format!("tool error: {e}"));
                 req.messages.push(Message {
                     role: Role::Tool,
-                    content: Some(result),
+                    content: Some(result.into()),
                     name: Some(tc.function.name.clone()),
                     tool_calls: vec![],
                     tool_call_id: Some(tc.id.clone()),
@@ -1447,7 +1447,7 @@ fn response_to_stream(resp: ChatResponse) -> ChunkStream {
                 index: c.index,
                 delta: Delta {
                     role: Some(c.message.role),
-                    content: c.message.content,
+                    content: c.message.content.as_ref().and_then(|mc| mc.to_text()),
                     ..Default::default()
                 },
                 finish_reason: c.finish_reason.or(Some("stop".to_string())),
@@ -1659,10 +1659,7 @@ mod tests {
             .chat(&mut ctx, req())
             .await
             .expect("request should still succeed");
-        assert_eq!(
-            resp.choices[0].message.content.as_deref(),
-            Some("real answer")
-        );
+        assert_eq!(resp.choices[0].message.text_content(), Some("real answer"));
     }
 
     // ---- M2 failover / key-selection tests ----
@@ -1789,7 +1786,7 @@ mod tests {
             .await
             .expect("fallback should succeed");
         assert_eq!(
-            resp.choices[0].message.content.as_deref(),
+            resp.choices[0].message.text_content(),
             Some("from fallback")
         );
         assert_eq!(ctx.attempt, 2, "primary + one fallback = 2 attempts");
@@ -2049,7 +2046,7 @@ mod tests {
             .await
             .expect("second key succeeds");
         assert_eq!(
-            resp.choices[0].message.content.as_deref(),
+            resp.choices[0].message.text_content(),
             Some("second key ok")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2, "should try a second key");
@@ -2081,7 +2078,7 @@ mod tests {
             .await
             .expect("rotates past the revoked key");
         assert_eq!(
-            resp.choices[0].message.content.as_deref(),
+            resp.choices[0].message.text_content(),
             Some("second key ok")
         );
         assert_eq!(
@@ -2917,7 +2914,7 @@ mod tests {
             } else {
                 // Second turn: the tool result should be in the message history.
                 let fed_back = req.messages.iter().any(|m| {
-                    matches!(m.role, Role::Tool) && m.content.as_deref() == Some("sunny in Paris")
+                    matches!(m.role, Role::Tool) && m.text_content() == Some("sunny in Paris")
                 });
                 let content = if fed_back {
                     "the weather is sunny in Paris"
@@ -2964,7 +2961,7 @@ mod tests {
             .await
             .expect("agentic run succeeds");
         assert_eq!(
-            resp.choices[0].message.content.as_deref(),
+            resp.choices[0].message.text_content(),
             Some("the weather is sunny in Paris")
         );
         assert_eq!(
@@ -2980,9 +2977,6 @@ mod tests {
         let engine = Kgateway::new(registry_with_ok_provider()).with_mcp(Arc::new(weather_mcp()));
         let mut ctx = Ctx::new();
         let resp = engine.chat_agentic(&mut ctx, req(), 8).await.unwrap();
-        assert_eq!(
-            resp.choices[0].message.content.as_deref(),
-            Some("real answer")
-        );
+        assert_eq!(resp.choices[0].message.text_content(), Some("real answer"));
     }
 }

@@ -18,13 +18,33 @@ use kgateway_core::context::Ctx;
 use kgateway_core::error::{KgError, KgErrorKind};
 use kgateway_core::provider::{ApiKey, ChunkStream, Provider, ProviderKey};
 use kgateway_core::schema::{
-    ChatRequest, ChatResponse, Choice, Delta, Message, Role, StreamChoice, StreamChunk, Usage,
+    ChatRequest, ChatResponse, Choice, ContentPart, Delta, Message, MessageContent, Role,
+    StreamChoice, StreamChunk, Usage,
 };
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// Parse a `data:<media_type>;base64,<data>` URI into its components.
+/// Returns `None` if the URI doesn't match the expected format.
+fn parse_data_uri(uri: &str) -> Option<(&str, &str)> {
+    let rest = uri.strip_prefix("data:")?;
+    let semicolon = rest.find(';')?;
+    let comma = rest.find(',')?;
+    if comma < semicolon {
+        return None;
+    }
+    let media_type = &rest[..semicolon];
+    let data = &rest[comma + 1..];
+    // Validate that the encoding is base64
+    let encoding = &rest[semicolon + 1..comma];
+    if !encoding.contains("base64") {
+        return None;
+    }
+    Some((media_type, data))
+}
 
 pub struct AnthropicProvider {
     key: ProviderKey,
@@ -73,12 +93,65 @@ impl AnthropicProvider {
             match m.role {
                 Role::System => {
                     if let Some(c) = &m.content {
-                        system_parts.push(c.clone());
+                        system_parts.push(c.to_text().unwrap_or_default());
                     }
                 }
                 Role::User => {
-                    if let Some(c) = &m.content {
-                        push("user", serde_json::json!({ "type": "text", "text": c }));
+                    if let Some(content) = &m.content {
+                        // Multimodal: emit each content part as its own Anthropic block.
+                        match content {
+                            MessageContent::Text(t) => {
+                                push("user", serde_json::json!({ "type": "text", "text": t }));
+                            }
+                            MessageContent::Parts(parts) => {
+                                for p in parts {
+                                    match p {
+                                        ContentPart::Text { text } => {
+                                            push(
+                                                "user",
+                                                serde_json::json!({ "type": "text", "text": text }),
+                                            );
+                                        }
+                                        ContentPart::ImageUrl { image_url } => {
+                                            // Anthropic image block: source.type = "base64" with media_type,
+                                            // or "url" for public URLs.
+                                            if image_url.url.starts_with("data:") {
+                                                // Parse data URI: data:<media_type>;base64,<data>
+                                                if let Some((media_type, data)) =
+                                                    parse_data_uri(&image_url.url)
+                                                {
+                                                    push(
+                                                        "user",
+                                                        serde_json::json!({
+                                                            "type": "image",
+                                                            "source": {
+                                                                "type": "base64",
+                                                                "media_type": media_type,
+                                                                "data": data,
+                                                            }
+                                                        }),
+                                                    );
+                                                }
+                                            } else {
+                                                push(
+                                                    "user",
+                                                    serde_json::json!({
+                                                        "type": "image",
+                                                        "source": {
+                                                            "type": "url",
+                                                            "url": image_url.url,
+                                                        }
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                        ContentPart::Other => {
+                                            // Unknown part type — skip for Anthropic (can't map safely)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Role::Tool => {
@@ -88,16 +161,16 @@ impl AnthropicProvider {
                         serde_json::json!({
                             "type": "tool_result",
                             "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                            "content": m.content.clone().unwrap_or_default(),
+                            "content": m.text_or_empty(),
                         }),
                     );
                 }
                 Role::Assistant => {
-                    if let Some(c) = &m.content {
-                        if !c.is_empty() {
+                    if let Some(text) = m.content.as_ref().and_then(|c| c.to_text()) {
+                        if !text.is_empty() {
                             push(
                                 "assistant",
-                                serde_json::json!({ "type": "text", "text": c }),
+                                serde_json::json!({ "type": "text", "text": text }),
                             );
                         }
                     }
@@ -372,7 +445,7 @@ impl AnthropicResponse {
                 index: 0,
                 message: Message {
                     role: Role::Assistant,
-                    content,
+                    content: content.map(MessageContent::Text),
                     name: None,
                     tool_calls,
                     tool_call_id: None,
@@ -807,10 +880,7 @@ mod tests {
         assert_eq!(out.object, "chat.completion");
         assert_eq!(out.model, "claude-3-5-sonnet-20241022");
         assert_eq!(out.choices.len(), 1);
-        assert_eq!(
-            out.choices[0].message.content.as_deref(),
-            Some("Hello, world!")
-        );
+        assert_eq!(out.choices[0].message.text_content(), Some("Hello, world!"));
         assert_eq!(out.choices[0].finish_reason.as_deref(), Some("end_turn"));
         assert_eq!(out.usage.prompt_tokens, 12);
         assert_eq!(out.usage.completion_tokens, 5);
@@ -846,7 +916,7 @@ mod tests {
             None,
         );
         let out = p.chat(&ctx, &test_key(), req).await.expect("chat ok");
-        assert_eq!(out.choices[0].message.content.as_deref(), Some("ok"));
+        assert_eq!(out.choices[0].message.text_content(), Some("ok"));
         // server drop verifies the `.expect(1)` matcher hit.
     }
 

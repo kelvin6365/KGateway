@@ -110,7 +110,7 @@ impl SemanticCachePlugin {
     }
 
     fn message_line(m: &Message) -> String {
-        format!("{:?}:{}", m.role, m.content.as_deref().unwrap_or(""))
+        format!("{:?}:{}", m.role, m.text_or_empty())
     }
 
     /// Stable (cross-restart) SHA-256 hex digest — used for both cache keys.
@@ -290,7 +290,7 @@ mod tests {
         let out = cache.pre_llm(&ctx2, req("what is 2+2?")).await.unwrap();
         match out {
             PreOutcome::ShortCircuit(resp) => {
-                assert_eq!(resp.choices[0].message.content.as_deref(), Some("4"));
+                assert_eq!(resp.choices[0].message.text_content(), Some("4"));
             }
             _ => panic!("expected cache hit short-circuit"),
         }
@@ -321,7 +321,7 @@ mod tests {
         let ctx = Ctx::new();
         let _ = cache.pre_llm(&ctx, req("hello")).await.unwrap();
         let out = cache.post_llm(&ctx, Ok(response("hi"))).await.unwrap();
-        assert_eq!(out.choices[0].message.content.as_deref(), Some("hi"));
+        assert_eq!(out.choices[0].message.text_content(), Some("hi"));
     }
 
     #[tokio::test]

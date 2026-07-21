@@ -170,4 +170,20 @@ cargo fmt --all --check
 
 ## License
 
-Apache-2.0.
+**Dual-licensed** — choose what fits your use case:
+
+| | AGPL-3.0 (Open Source) | Commercial License |
+|---|---|---|
+| Self-host, modify, contribute | ✅ Free | ✅ Free |
+| Offer as a managed/SaaS service | ✅ Must open-source changes | ✅ No sharing required |
+| Embed in closed-source product | ❌ | ✅ |
+| SSO, SLA, indemnification | — | ✅ |
+
+- **Open source:** [AGPL-3.0](./LICENSE) — free for self-hosting, modification, and
+  contribution. If you offer KGateway as a network service, you must open-source your
+  modifications.
+- **Commercial:** For closed-source use, managed services, or enterprise features (SSO,
+  SLA, indemnification), contact **kelvin.kwong@2rocksstudio.hk**. See
+  [`COMMERCIAL_LICENSE.md`](./COMMERCIAL_LICENSE.md) for details.
+
+By contributing, you agree to the [CLA](./COMMERCIAL_LICENSE.md#contributor-license-agreement-cla).

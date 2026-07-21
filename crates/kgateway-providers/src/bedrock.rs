@@ -19,7 +19,9 @@ use hmac::{Hmac, Mac};
 use kgateway_core::context::Ctx;
 use kgateway_core::error::{KgError, KgErrorKind};
 use kgateway_core::provider::{ApiKey, ChunkStream, Provider, ProviderKey};
-use kgateway_core::schema::{ChatRequest, ChatResponse, Choice, Message, Role, Usage};
+use kgateway_core::schema::{
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, Role, Usage,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -97,20 +99,20 @@ impl BedrockProvider {
         for m in &req.messages {
             match m.role {
                 Role::System => {
-                    if let Some(c) = &m.content {
-                        system.push(TextBlock { text: c.clone() });
+                    if let Some(t) = m.content.as_ref().and_then(|c| c.to_text()) {
+                        system.push(TextBlock { text: t });
                     }
                 }
                 Role::User | Role::Tool => messages.push(ConverseMessage {
                     role: "user".into(),
                     content: vec![TextBlock {
-                        text: m.content.clone().unwrap_or_default(),
+                        text: m.text_or_empty(),
                     }],
                 }),
                 Role::Assistant => messages.push(ConverseMessage {
                     role: "assistant".into(),
                     content: vec![TextBlock {
-                        text: m.content.clone().unwrap_or_default(),
+                        text: m.text_or_empty(),
                     }],
                 }),
             }
@@ -440,7 +442,7 @@ impl ConverseResponse {
                 index: 0,
                 message: Message {
                     role: Role::Assistant,
-                    content,
+                    content: content.map(MessageContent::Text),
                     name: None,
                     tool_calls: vec![],
                     tool_call_id: None,
@@ -669,10 +671,7 @@ mod tests {
             out.model, "anthropic.claude-3-5-sonnet-20240620-v1:0",
             "model id has the provider prefix stripped"
         );
-        assert_eq!(
-            out.choices[0].message.content.as_deref(),
-            Some("Hello, world!")
-        );
+        assert_eq!(out.choices[0].message.text_content(), Some("Hello, world!"));
         assert_eq!(out.choices[0].finish_reason.as_deref(), Some("end_turn"));
         assert_eq!(out.usage.prompt_tokens, 12);
         assert_eq!(out.usage.completion_tokens, 5);
