@@ -57,19 +57,67 @@ struct AnthropicMetadata {
     user_id: Option<String>,
 }
 
-/// Derive a session id from an Anthropic `metadata.user_id`. Claude Code sends values
-/// shaped like `user_<account-hash>_account__session_<uuid>`; when that shape is present we
-/// key on the `session_<uuid>` tail so distinct sessions of one account stay distinct.
-/// Anything else is used verbatim (sanitized downstream).
+/// Derive a session id from an Anthropic `metadata.user_id`. Claude Code sends values shaped
+/// like `user_<account-hash>_account__session_<uuid>`; we key on the session so distinct
+/// sessions of one account stay distinct. Some clients instead stuff a JSON-ish
+/// `"session_id":"<uuid>"` into the field. In both cases we extract the identifier that
+/// follows the *last* `session` marker: the UUID that appears after it if there is one
+/// (the clean, common case), else the id-like token immediately after it. When there is no
+/// `session` marker at all, the whole value is used verbatim (sanitized downstream).
 fn derive_session_id(user_id: &str) -> Option<String> {
     let trimmed = user_id.trim();
     if trimmed.is_empty() {
         return None;
     }
-    match trimmed.rfind("session_") {
-        Some(idx) => Some(trimmed[idx..].to_string()),
-        None => Some(trimmed.to_string()),
+    if let Some(pos) = trimmed.rfind("session") {
+        let tail = &trimmed[pos..];
+        // Prefer a UUID after the marker — handles both `..._session_<uuid>` and a
+        // JSON-ish `"session_id":"<uuid>"` (where the bare token after `session` would be
+        // the JSON key `id`, not the id we want).
+        if let Some(uuid) = find_uuid(tail) {
+            return Some(uuid);
+        }
+        // Otherwise the id-like token right after `session` + any separators.
+        let token: String = tail["session".len()..]
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !token.is_empty() {
+            return Some(token);
+        }
     }
+    Some(trimmed.to_string())
+}
+
+/// Find the first canonical UUID (8-4-4-4-12 hex, dash-separated) in `s`, if any.
+fn find_uuid(s: &str) -> Option<String> {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i + 36 <= b.len() {
+        let mut pos = i;
+        let mut ok = true;
+        for (gi, &len) in GROUPS.iter().enumerate() {
+            if !b[pos..pos + len].iter().all(u8::is_ascii_hexdigit) {
+                ok = false;
+                break;
+            }
+            pos += len;
+            if gi < GROUPS.len() - 1 {
+                if b[pos] != b'-' {
+                    ok = false;
+                    break;
+                }
+                pos += 1;
+            }
+        }
+        if ok {
+            return Some(s[i..i + 36].to_string());
+        }
+        i += 1;
+    }
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -537,11 +585,33 @@ mod tests {
     }
 
     #[test]
-    fn derive_session_id_extracts_claude_code_session_segment() {
-        // Claude Code's `metadata.user_id` shape → key on the session_ tail.
+    fn derive_session_id_extracts_claude_code_uuid() {
+        // Claude Code's real `metadata.user_id` shape carries a UUID session id → extract it
+        // clean, and NOT the account UUID that precedes it.
+        assert_eq!(
+            derive_session_id(
+                "user_11111111-1111-1111-1111-111111111111_account__session_019f92ef-b569-7000-9d48-f60bfd73bd95"
+            ),
+            Some("019f92ef-b569-7000-9d48-f60bfd73bd95".into())
+        );
+    }
+
+    #[test]
+    fn derive_session_id_extracts_uuid_from_json_ish_value() {
+        // Regression: a client that puts a JSON-ish `"session_id":"<uuid>"` into the field
+        // must NOT yield the garbage tail `session_id":"…"}` — extract the UUID.
+        assert_eq!(
+            derive_session_id("{\"session_id\":\"019f92ef-b569-7000-9d48-f60bfd73bd95\"}"),
+            Some("019f92ef-b569-7000-9d48-f60bfd73bd95".into())
+        );
+    }
+
+    #[test]
+    fn derive_session_id_extracts_non_uuid_session_token() {
+        // No UUID → fall back to the id token right after the session marker.
         assert_eq!(
             derive_session_id("user_abc123_account__session_9f8e7d6c"),
-            Some("session_9f8e7d6c".into())
+            Some("9f8e7d6c".into())
         );
     }
 
@@ -554,19 +624,19 @@ mod tests {
     #[test]
     fn metadata_user_id_is_captured_and_derived() {
         // The `metadata` object must survive deserialization (previously it was dropped),
-        // and its user_id must resolve to the session segment.
+        // and its user_id must resolve to the session id.
         let areq = req(json!({
             "model": "anthropic/claude",
             "max_tokens": 10,
             "messages": [{ "role": "user", "content": "hi" }],
-            "metadata": { "user_id": "user_x_account__session_deadbeef" },
+            "metadata": { "user_id": "user_x_account__session_019f92ef-b569-7000-9d48-f60bfd73bd95" },
         }));
         let hint = areq
             .metadata
             .as_ref()
             .and_then(|m| m.user_id.as_deref())
             .and_then(derive_session_id);
-        assert_eq!(hint, Some("session_deadbeef".into()));
+        assert_eq!(hint, Some("019f92ef-b569-7000-9d48-f60bfd73bd95".into()));
     }
 
     #[test]

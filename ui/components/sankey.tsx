@@ -109,8 +109,32 @@ function layout(
   const labelOf = (id: string) => nodes.find((n) => n.id === id)?.label ?? id;
   const colW = maxLayer > 0 ? (width - NODE_W - H_PAD * 2) / maxLayer : 0;
 
+  // For color inheritance: the single incoming source that contributes the most value to
+  // each target, so a downstream node can take its dominant upstream node's color.
+  const dominantSource = new Map<string, string>();
+  {
+    const perTarget = new Map<string, Map<string, number>>();
+    for (const l of clean) {
+      if (!perTarget.has(l.target)) perTarget.set(l.target, new Map());
+      const m = perTarget.get(l.target)!;
+      m.set(l.source, (m.get(l.source) ?? 0) + l.value);
+    }
+    for (const [target, m] of perTarget) {
+      let best = "";
+      let bestV = -1;
+      for (const [src, v] of m) {
+        if (v > bestV) {
+          bestV = v;
+          best = src;
+        }
+      }
+      dominantSource.set(target, best);
+    }
+  }
+
   // Place nodes: within a layer, order by descending value; stack from the top, centering
-  // shorter columns vertically.
+  // shorter columns vertically. Processing layers ascending means a node's dominant source
+  // (always in an earlier layer) already has a color to inherit.
   const pos = new Map<string, { x: number; y: number; h: number; color: string }>();
   const colorFor = new Map<string, string>();
   let colorIdx = 0;
@@ -122,13 +146,13 @@ function layout(
     const x = H_PAD + ln * colW;
     for (const id of ordered) {
       const h = Math.max(2, nodeValue(id) * scale);
-      // Source-layer nodes seed the palette; others inherit their dominant source color.
-      let color = colorFor.get(id);
-      if (!color) {
-        color = NODE_COLORS[colorIdx % NODE_COLORS.length];
-        colorIdx++;
-        colorFor.set(id, color);
-      }
+      // Nodes with no incoming edge (the first column) seed the palette; every downstream
+      // node inherits its dominant upstream source's color, so a ribbon's color traces its
+      // origin across the diagram.
+      const src = dominantSource.get(id);
+      const color =
+        (src && colorFor.get(src)) || NODE_COLORS[colorIdx++ % NODE_COLORS.length];
+      colorFor.set(id, color);
       pos.set(id, { x, y, h, color });
       y += h + gap;
     }

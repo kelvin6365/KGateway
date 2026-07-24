@@ -316,6 +316,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_id_roundtrips_through_the_sql_column() {
+        let store = SqliteLogStore::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+
+        let mut with = sample("req-sess", 10);
+        with.session_id = Some("sess-abc".to_string());
+        store.append(with).await.expect("append with session");
+        store
+            .append(sample("req-none", 10))
+            .await
+            .expect("append without session");
+
+        let got = store.recent(10).await.expect("recent");
+        let by_id = |id: &str| got.iter().find(|l| l.request_id == id).unwrap();
+        // Written into (and read back out of) the real `session_id` column, not some other.
+        assert_eq!(by_id("req-sess").session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(by_id("req-none").session_id, None);
+    }
+
+    #[tokio::test]
     async fn append_and_recent_roundtrip_newest_first() {
         let store = SqliteLogStore::connect("sqlite::memory:")
             .await
