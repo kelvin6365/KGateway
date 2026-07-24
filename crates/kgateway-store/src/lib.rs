@@ -37,6 +37,12 @@ pub struct RequestLog {
     pub created_at: i64,
     /// The virtual key that made the request, if any.
     pub virtual_key: Option<String>,
+    /// Client-supplied session identifier used to group a working session's many calls
+    /// into one journey. Resolved at ingress (`x-session-id` header, or the OpenAI `user`
+    /// / Anthropic `metadata.user_id` body hint). `None` when the caller sent no hint.
+    /// It's an opaque grouping label, not content — safe to expose and store by default.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub provider: String,
     pub model: String,
     pub status: u16,
@@ -89,6 +95,8 @@ pub struct LogFilter {
     pub model: Option<String>,
     pub status: Option<u16>,
     pub virtual_key: Option<String>,
+    /// Exact session id (groups a session's calls). `None` = no constraint.
+    pub session_id: Option<String>,
     /// created_at >= this (unix ms).
     pub since_ms: Option<i64>,
     /// Only cache hits (Some(true)) / only misses (Some(false)).
@@ -116,6 +124,11 @@ impl LogFilter {
         }
         if let Some(vk) = &self.virtual_key {
             if l.virtual_key.as_deref() != Some(vk.as_str()) {
+                return false;
+            }
+        }
+        if let Some(sid) = &self.session_id {
+            if l.session_id.as_deref() != Some(sid.as_str()) {
                 return false;
             }
         }
@@ -461,6 +474,136 @@ fn compute_filter_values(logs: &[RequestLog]) -> FilterData {
     }
 }
 
+/// Aggregate view of one session — a group of calls sharing a `session_id`. Powers the
+/// dashboard's Sessions list and the per-session journey header. Computed over the recent
+/// scan window (see [`DEFAULT_SCAN_LIMIT`]), like the other analytics.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// First and last call time in the session (unix ms) — the journey's span.
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub call_count: u64,
+    pub total_tokens: u64,
+    pub total_cost: f64,
+    pub error_count: u64,
+    pub cache_hits: u64,
+    /// Distinct providers and models the session touched (sorted).
+    pub providers: Vec<String>,
+    pub models: Vec<String>,
+    /// The most recently seen virtual key for the session (callers usually reuse one).
+    pub virtual_key: Option<String>,
+}
+
+/// How the session list is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionSort {
+    /// Most recently active first (default).
+    #[default]
+    LastActivity,
+    /// Highest estimated cost first.
+    Cost,
+    /// Most tokens first.
+    Tokens,
+    /// Most calls first.
+    Calls,
+}
+
+/// A page of session summaries plus the pre-pagination total.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub total: usize,
+}
+
+/// Group logs by `session_id` into per-session aggregates. Logs with no session id are
+/// skipped (they aren't part of any journey).
+fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
+    use std::collections::BTreeSet;
+    struct Acc {
+        first_ts: i64,
+        last_ts: i64,
+        call_count: u64,
+        total_tokens: u64,
+        total_cost: f64,
+        error_count: u64,
+        cache_hits: u64,
+        providers: BTreeSet<String>,
+        models: BTreeSet<String>,
+        virtual_key: Option<String>,
+        vk_at: i64,
+    }
+    let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+    for l in logs {
+        let Some(sid) = &l.session_id else { continue };
+        let a = map.entry(sid.clone()).or_insert_with(|| Acc {
+            first_ts: l.created_at,
+            last_ts: l.created_at,
+            call_count: 0,
+            total_tokens: 0,
+            total_cost: 0.0,
+            error_count: 0,
+            cache_hits: 0,
+            providers: BTreeSet::new(),
+            models: BTreeSet::new(),
+            virtual_key: None,
+            vk_at: i64::MIN,
+        });
+        a.first_ts = a.first_ts.min(l.created_at);
+        a.last_ts = a.last_ts.max(l.created_at);
+        a.call_count += 1;
+        a.total_tokens += l.total_tokens();
+        a.total_cost += l.cost.unwrap_or(0.0);
+        if is_error(l.status) {
+            a.error_count += 1;
+        }
+        if l.cache_hit {
+            a.cache_hits += 1;
+        }
+        a.providers.insert(l.provider.clone());
+        a.models.insert(l.model.clone());
+        // Keep the most recently seen virtual key.
+        if l.created_at >= a.vk_at {
+            a.vk_at = l.created_at;
+            a.virtual_key = l.virtual_key.clone();
+        }
+    }
+    map.into_iter()
+        .map(|(session_id, a)| SessionSummary {
+            session_id,
+            first_ts: a.first_ts,
+            last_ts: a.last_ts,
+            call_count: a.call_count,
+            total_tokens: a.total_tokens,
+            total_cost: a.total_cost,
+            error_count: a.error_count,
+            cache_hits: a.cache_hits,
+            providers: a.providers.into_iter().collect(),
+            models: a.models.into_iter().collect(),
+            virtual_key: a.virtual_key,
+        })
+        .collect()
+}
+
+/// Sort session summaries in place by `sort` (descending), tiebroken by session id for
+/// deterministic output.
+fn sort_sessions(sessions: &mut [SessionSummary], sort: SessionSort) {
+    let score = |s: &SessionSummary| -> f64 {
+        match sort {
+            SessionSort::LastActivity => s.last_ts as f64,
+            SessionSort::Cost => s.total_cost,
+            SessionSort::Tokens => s.total_tokens as f64,
+            SessionSort::Calls => s.call_count as f64,
+        }
+    };
+    sessions.sort_by(|a, b| {
+        score(b)
+            .partial_cmp(&score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+}
+
 /// Max rows a default (non-pushed-down) query scans. Backends that implement `query`
 /// with real SQL should override to avoid this bound.
 const DEFAULT_SCAN_LIMIT: usize = 10_000;
@@ -583,6 +726,24 @@ pub trait LogStore: Send + Sync {
         Ok(compute_filter_values(&logs))
     }
 
+    /// Sessions (grouped calls) matching `filter`, ordered by `sort`, paginated. Computed
+    /// over the recent scan window in Rust, like the other analytics — a session that
+    /// scrolled out of the window is not resurrected here.
+    async fn sessions(
+        &self,
+        filter: &LogFilter,
+        sort: SessionSort,
+        limit: usize,
+        offset: usize,
+    ) -> Result<SessionPage, StoreError> {
+        let logs = self.scan_filtered(filter).await?;
+        let mut sessions = compute_sessions(&logs);
+        sort_sessions(&mut sessions, sort);
+        let total = sessions.len();
+        let sessions = sessions.into_iter().skip(offset).take(limit).collect();
+        Ok(SessionPage { sessions, total })
+    }
+
     /// Shared helper: fetch the recent window and apply a filter. (Bodies are already
     /// stripped by `recent`, which is fine — analytics only reads scalars.)
     async fn scan_filtered(&self, filter: &LogFilter) -> Result<Vec<RequestLog>, StoreError> {
@@ -692,6 +853,7 @@ mod tests {
             request_id: id.to_string(),
             created_at,
             virtual_key: None,
+            session_id: None,
             provider: "openai".into(),
             model: "gpt-4o".into(),
             status: 200,
@@ -821,5 +983,134 @@ mod tests {
         assert_eq!(fd.providers, vec!["anthropic", "openai"]);
         assert_eq!(fd.models, vec!["claude", "gpt-4o"]);
         assert_eq!(fd.virtual_keys, vec!["vk1"]); // distinct
+    }
+
+    /// A status-200 log with a session id + chosen provider/model/tokens/cost. Tests that
+    /// need a non-200 status or a cache hit override those via struct-update syntax.
+    fn sess_log(
+        id: &str,
+        ts: i64,
+        session: Option<&str>,
+        provider: &str,
+        model: &str,
+        tokens: u32,
+        cost: f64,
+    ) -> RequestLog {
+        RequestLog {
+            created_at: ts,
+            session_id: session.map(str::to_string),
+            provider: provider.into(),
+            model: model.into(),
+            status: 200,
+            prompt_tokens: tokens,
+            cost: Some(cost),
+            ..log_at(id, ts)
+        }
+    }
+
+    #[test]
+    fn compute_sessions_groups_and_aggregates() {
+        let logs = vec![
+            sess_log("a", 100, Some("s1"), "openai", "gpt-4o", 10, 0.01),
+            sess_log("b", 300, Some("s1"), "openai", "gpt-4o-mini", 20, 0.02),
+            sess_log("c", 200, Some("s1"), "anthropic", "claude", 5, 0.05),
+            sess_log("d", 150, Some("s2"), "openai", "gpt-4o", 7, 0.03),
+            // No session id → excluded from grouping entirely.
+            sess_log("e", 400, None, "openai", "gpt-4o", 99, 9.9),
+        ];
+        let mut sessions = compute_sessions(&logs);
+        sort_sessions(&mut sessions, SessionSort::LastActivity);
+
+        assert_eq!(
+            sessions.len(),
+            2,
+            "only s1 and s2; the sessionless call is dropped"
+        );
+
+        // s1 was last active at ts=300 → sorts first by LastActivity.
+        let s1 = &sessions[0];
+        assert_eq!(s1.session_id, "s1");
+        assert_eq!(s1.call_count, 3);
+        assert_eq!(s1.first_ts, 100);
+        assert_eq!(s1.last_ts, 300);
+        assert_eq!(s1.total_tokens, 35); // 10 + 20 + 5, completion is 0 in the helper
+        assert!((s1.total_cost - 0.08).abs() < 1e-9);
+        assert_eq!(s1.error_count, 0);
+        assert_eq!(s1.providers, vec!["anthropic", "openai"]); // distinct, sorted
+        assert_eq!(s1.models, vec!["claude", "gpt-4o", "gpt-4o-mini"]);
+
+        let s2 = &sessions[1];
+        assert_eq!(s2.session_id, "s2");
+        assert_eq!(s2.call_count, 1);
+    }
+
+    #[test]
+    fn compute_sessions_counts_errors_and_cache_hits() {
+        let logs = vec![
+            RequestLog {
+                status: 500,
+                ..sess_log("a", 1, Some("s1"), "openai", "gpt-4o", 0, 0.0)
+            },
+            RequestLog {
+                cache_hit: true,
+                ..sess_log("b", 2, Some("s1"), "openai", "gpt-4o", 0, 0.0)
+            },
+        ];
+        let sessions = compute_sessions(&logs);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].error_count, 1);
+        assert_eq!(sessions[0].cache_hits, 1);
+    }
+
+    #[test]
+    fn sort_sessions_orders_descending_by_metric() {
+        let mut sessions = [
+            sess_log("a", 10, Some("cheap"), "openai", "m", 1, 0.01),
+            sess_log("b", 20, Some("pricey"), "openai", "m", 1, 5.0),
+        ]
+        .iter()
+        .map(|l| compute_sessions(std::slice::from_ref(l)).pop().unwrap())
+        .collect::<Vec<_>>();
+        sort_sessions(&mut sessions, SessionSort::Cost);
+        assert_eq!(sessions[0].session_id, "pricey");
+        assert_eq!(sessions[1].session_id, "cheap");
+    }
+
+    #[tokio::test]
+    async fn store_sessions_filter_and_paginate() {
+        let store = MemoryLogStore::default();
+        for l in [
+            sess_log("a", 100, Some("s1"), "openai", "gpt-4o", 10, 0.01),
+            sess_log("b", 200, Some("s1"), "openai", "gpt-4o", 10, 0.01),
+            sess_log("c", 300, Some("s2"), "openai", "gpt-4o", 10, 0.01),
+        ] {
+            store.append(l).await.unwrap();
+        }
+
+        // Unfiltered: two sessions.
+        let page = store
+            .sessions(&LogFilter::default(), SessionSort::LastActivity, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+
+        // Filter to one session id → the journey's calls come back via `query`.
+        let one = LogFilter {
+            session_id: Some("s1".into()),
+            ..Default::default()
+        };
+        let calls = store
+            .query(&LogQuery {
+                filter: one,
+                limit: 50,
+                offset: 0,
+                sort_by: SortBy::CreatedAt,
+                descending: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.total, 2);
+        assert_eq!(calls.logs[0].request_id, "a"); // oldest first
+        assert_eq!(calls.logs[1].request_id, "b");
     }
 }

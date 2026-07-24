@@ -102,7 +102,7 @@ function toOperations(spec: OpenApiSpec | undefined): Operation[] {
  * file or the query string is worse than showing none: the reader copies it, gets a
  * 400, and blames the API.
  */
-function asLanguage(op: Operation, lang: Lang): string | null {
+function asLanguage(op: Operation, lang: Lang, apiBaseUrl: string): string | null {
   if (lang === "curl") return op.curl;
   // `-F` is multipart; there's no honest one-line requests/fetch equivalent here.
   if (/\s-F\s/.test(op.curl)) return null;
@@ -111,7 +111,9 @@ function asLanguage(op: Operation, lang: Lang): string | null {
   // survive; rebuilding it from op.path drops `?token=…` and leaves `{id}` literal.
   const urlMatch = op.curl.match(/https?:\/\/[^\s'"]+/);
   if (!urlMatch) return null;
-  const url = urlMatch[0].replace("http://localhost:8080", BASE_URL);
+  // The gateway already substitutes its resolved base into the curl sample; re-point any
+  // remaining localhost default at the config-driven API domain so all three tabs agree.
+  const url = urlMatch[0].replace("http://localhost:8080", apiBaseUrl);
 
   const bodyParams = op.params.filter((p) => p.location === "body");
   const bodyMatch = op.curl.match(/-d '([\s\S]*?)'/);
@@ -167,9 +169,9 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
   );
 }
 
-function EndpointCard({ op }: { op: Operation }) {
+function EndpointCard({ op, apiBaseUrl }: { op: Operation; apiBaseUrl: string }) {
   const [lang, setLang] = useState<Lang>("curl");
-  const sample = asLanguage(op, lang);
+  const sample = asLanguage(op, lang, apiBaseUrl);
 
   return (
     <Card id={op.slug} className="scroll-mt-6 overflow-hidden py-0">
@@ -289,6 +291,13 @@ export default function DocsPage() {
     staleTime: 300000,
   });
 
+  // The API domain to advertise in the reference. The gateway resolves this from its
+  // `public_url` config (falling back to the request Host) and reports it in the spec's
+  // `servers[]`; we fall back to BASE_URL only before the spec has loaded. This is the
+  // URL a caller's SDK should target — distinct from BASE_URL, the origin the dashboard
+  // itself reaches the gateway at (used for the fetches and download links below).
+  const apiBaseUrl = spec?.servers?.[0]?.url ?? BASE_URL;
+
   const operations = useMemo(() => toOperations(spec), [spec]);
   const groups = useMemo(() => {
     const order: string[] = spec?.tags?.map((t) => t.name) ?? [];
@@ -343,6 +352,15 @@ export default function DocsPage() {
           <p className="text-sm text-muted-foreground">
             Every endpoint this gateway serves, generated from its own route table.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Base URL
+            </span>
+            <code className="rounded border bg-background/60 px-2 py-0.5 font-mono text-xs">
+              {apiBaseUrl}
+            </code>
+            <CopyButton text={apiBaseUrl} />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <CopyButton text={pageMarkdown} label="Copy page" />
@@ -416,7 +434,7 @@ export default function DocsPage() {
               <section key={group} className="flex flex-col gap-3">
                 <h2 className="font-display text-xl font-semibold tracking-wide">{group}</h2>
                 {ops.map((op) => (
-                  <EndpointCard key={op.slug} op={op} />
+                  <EndpointCard key={op.slug} op={op} apiBaseUrl={apiBaseUrl} />
                 ))}
               </section>
             ))}

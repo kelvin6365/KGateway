@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
     request_id        TEXT    NOT NULL,
     created_at        BIGINT  NOT NULL DEFAULT 0,
     virtual_key       TEXT,
+    session_id        TEXT,
     provider          TEXT    NOT NULL,
     model             TEXT    NOT NULL,
     status            INT     NOT NULL,
@@ -63,6 +64,7 @@ const MIGRATE_COLUMNS: &[&str] = &[
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS redacted BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS redaction_mapping TEXT",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS spans TEXT",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS session_id TEXT",
 ];
 
 /// Postgres-backed append-only log store.
@@ -101,6 +103,7 @@ struct RequestLogRow {
     request_id: String,
     created_at: i64,
     virtual_key: Option<String>,
+    session_id: Option<String>,
     provider: String,
     model: String,
     status: i32,
@@ -127,6 +130,7 @@ impl From<RequestLogRow> for RequestLog {
             request_id: r.request_id,
             created_at: r.created_at,
             virtual_key: r.virtual_key,
+            session_id: r.session_id,
             provider: r.provider,
             model: r.model,
             // Values were written from u16/u32/u64 originals, so these casts are
@@ -152,28 +156,30 @@ impl From<RequestLogRow> for RequestLog {
 
 /// Column list for the lean list/`recent` query. Body columns are selected as typed NULL
 /// literals so large captured payloads are never read on the hot list path.
-const LIST_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
+const LIST_COLUMNS: &str =
+    "request_id, created_at, virtual_key, session_id, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, CAST(NULL AS TEXT) AS request_body, CAST(NULL AS TEXT) AS response_body, \
      CAST(NULL AS TEXT) AS spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Detail column list: captured bodies + `redacted`, but the encrypted mapping is NULLed
 /// (loaded only by the reveal query, not ordinary detail reads).
-const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
+const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, request_body, response_body, spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Reveal column list: everything including the encrypted mapping. Used ONLY by
 /// `get_with_mapping` behind the `logs:reveal` gate.
-const REVEAL_COLUMNS: &str = "request_id, created_at, virtual_key, provider, model, status, \
+const REVEAL_COLUMNS: &str =
+    "request_id, created_at, virtual_key, session_id, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, request_body, response_body, spans, redacted, redaction_mapping";
 
 const INSERT_SQL: &str = "INSERT INTO request_logs \
      (request_id, created_at, virtual_key, provider, model, status, prompt_tokens, \
       completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, error_message, \
-      request_body, response_body, spans, redacted, redaction_mapping) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
+      request_body, response_body, spans, redacted, redaction_mapping, session_id) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
 
 /// Build the bound INSERT for one log. Shared by `append` (single) and `append_batch`
 /// (transaction). Bound values are owned, so the query is `'static` and can execute
@@ -201,6 +207,7 @@ fn insert_query(
         .bind(log.spans)
         .bind(log.redacted)
         .bind(log.redaction_mapping)
+        .bind(log.session_id)
 }
 
 #[async_trait]
@@ -276,6 +283,7 @@ mod tests {
             request_id: request_id.to_string(),
             created_at: 1_700_000_000_000,
             virtual_key: Some("vk-test".to_string()),
+            session_id: None,
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             status: 200,

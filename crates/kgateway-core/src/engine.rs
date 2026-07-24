@@ -196,6 +196,9 @@ struct StreamCaptureGuard {
     observers: Vec<Arc<dyn RequestObserver>>,
     request_id: RequestId,
     virtual_key: Option<String>,
+    /// Snapshot of the request's session id, restored onto the reconstructed `Ctx` so the
+    /// deferred audit record is grouped into the right session (mirrors `virtual_key`).
+    session_id: Option<String>,
     started_at: std::time::Instant,
     model_full: String,
     req_body: Option<String>,
@@ -311,6 +314,7 @@ impl Drop for StreamCaptureGuard {
         };
         let request_id = self.request_id;
         let virtual_key = self.virtual_key.take();
+        let session_id = self.session_id.take();
         let started_at = self.started_at;
         let spans = self.spans.clone();
         // Split the stream into TTFT (already recorded at dispatch) and body transfer, so
@@ -358,6 +362,7 @@ impl Drop for StreamCaptureGuard {
             let mut c = Ctx::new();
             c.request_id = request_id;
             c.virtual_key = virtual_key;
+            c.session_id = session_id;
             c.started_at = started_at;
             c.spans = spans;
             for o in &observers {
@@ -1086,6 +1091,7 @@ impl Kgateway {
             observers: self.observers.clone(),
             request_id: ctx.request_id,
             virtual_key: ctx.virtual_key.clone(),
+            session_id: ctx.session_id.clone(),
             started_at: ctx.started_at,
             model_full,
             req_body,

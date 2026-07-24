@@ -34,6 +34,13 @@ impl std::fmt::Display for RequestId {
 pub struct Ctx {
     pub request_id: RequestId,
     pub virtual_key: Option<String>,
+    /// Client-supplied session identifier, when present, used to group a working
+    /// session's many calls into one journey (e.g. a Claude Code CLI run). Resolved at
+    /// ingress from the `x-session-id` header, or derived from the request body's user
+    /// hint (OpenAI `user` / Anthropic `metadata.user_id`). Unlike `virtual_key` (one
+    /// key = every session of its holder) this distinguishes individual sessions. `None`
+    /// when the caller sends no hint.
+    pub session_id: Option<String>,
     pub attempt: u32,
     pub started_at: Instant,
     /// Trace spans for this request's waterfall. Behind a mutex because most of
@@ -49,6 +56,7 @@ impl Ctx {
         Self {
             request_id: RequestId::new(),
             virtual_key: None,
+            session_id: None,
             attempt: 0,
             started_at: Instant::now(),
             spans: Arc::new(SpanCollector::new()),

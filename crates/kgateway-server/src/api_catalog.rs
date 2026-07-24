@@ -515,6 +515,36 @@ dashboard's filter dropdowns offer real options.",
     },
     Endpoint {
         method: "GET",
+        path: "/api/sessions",
+        auth: Auth::LogsView,
+        summary: "Sessions — grouped AI-usage journeys",
+        description: "Groups the request log by session id (from the `x-session-id` header, or the \
+OpenAI `user` / Anthropic `metadata.user_id` body hint) into per-session summaries: call count, \
+tokens, cost, error count, cache hits, the models and providers touched, and the session's time span. \
+Grouping is computed over the recent log window.",
+        params: &[
+            Param { name: "sort", location: "query", ty: "string", required: false, description: "`recent` (default, last activity) | `cost` | `tokens` | `calls`." },
+            Param { name: "limit", location: "query", ty: "integer", required: false, description: "Page size, capped at 200. Default 50." },
+            Param { name: "offset", location: "query", ty: "integer", required: false, description: "Sessions to skip." },
+            F_PROVIDER, F_MODEL, F_STATUS, F_VKEY, F_SINCE, F_CACHE_HIT, F_SEARCH,
+        ],
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  'http://localhost:8080/api/sessions?sort=cost&limit=20'",
+        response: "",
+    },
+    Endpoint {
+        method: "GET",
+        path: "/api/sessions/{id}",
+        auth: Auth::LogsView,
+        summary: "One session's full journey",
+        description: "A session's summary plus every call in it, oldest first — the order the agent \
+made them. Powers the dashboard's session timeline and Sankey diagrams. 404 if the session id has \
+scrolled out of the recent log window.",
+        params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "The session id." }],
+        example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/sessions/$SESSION_ID",
+        response: "",
+    },
+    Endpoint {
+        method: "GET",
         path: "/api/logs/dropped",
         auth: Auth::LogsView,
         summary: "Count of audit rows dropped under load",

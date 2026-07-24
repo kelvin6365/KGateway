@@ -14,7 +14,9 @@ use kgateway_core::provider::{
     EmbeddingRequest, ImageGenerationRequest, RerankRequest, SpeechRequest, TranscriptionRequest,
 };
 use kgateway_core::schema::ChatRequest;
-use kgateway_store::{HistogramMetric, LogFilter, LogQuery, RankDimension, RankMetric, SortBy};
+use kgateway_store::{
+    HistogramMetric, LogFilter, LogQuery, RankDimension, RankMetric, SessionSort, SortBy,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -33,6 +35,42 @@ pub(crate) fn vkey_from_headers(headers: &HeaderMap) -> Option<String> {
     auth.strip_prefix("Bearer ")
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+/// Max stored session-id length. A session id is an opaque grouping key shown in the
+/// dashboard, not a lookup into any store, so we only need it bounded — long enough for a
+/// UUID-plus-prefix (Claude Code's `user_…_session_<uuid>`), short enough that a hostile
+/// client can't bloat a log row.
+const MAX_SESSION_ID_LEN: usize = 200;
+
+/// Resolve the session id for a request. Precedence: an explicit `x-session-id` header
+/// wins; otherwise a body-supplied user hint (`body_user` — OpenAI `user`, or the value
+/// derived from Anthropic `metadata.user_id`). Returns `None` when neither is present.
+///
+/// The value is sanitized: trimmed, control characters dropped, and length-capped. It is
+/// a grouping label only and is never forwarded upstream.
+pub(crate) fn session_id_from(headers: &HeaderMap, body_user: Option<&str>) -> Option<String> {
+    let raw = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        // A blank header must not shadow a real body hint — fall through to it.
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| body_user.map(|s| s.to_string()))?;
+    sanitize_session_id(&raw)
+}
+
+/// Trim, strip control characters, and length-cap a candidate session id. `None` if empty
+/// after cleaning.
+pub(crate) fn sanitize_session_id(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_SESSION_ID_LEN)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -65,6 +103,8 @@ pub struct LogsParams {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub virtual_key: Option<String>,
+    /// Group filter — only calls belonging to this session id (see the Sessions view).
+    pub session_id: Option<String>,
     pub search: Option<String>,
     pub status: Option<u16>,
     pub since_ms: Option<i64>,
@@ -85,6 +125,7 @@ impl LogsParams {
             model: nonempty(&self.model),
             status: self.status,
             virtual_key: nonempty(&self.virtual_key),
+            session_id: nonempty(&self.session_id),
             since_ms: self.since_ms,
             cache_hit: self.cache_hit,
             search: nonempty(&self.search),
@@ -147,6 +188,7 @@ fn filter_from_map(q: &HashMap<String, String>) -> LogFilter {
         model: ne("model"),
         status: q.get("status").and_then(|s| s.parse().ok()),
         virtual_key: ne("virtual_key"),
+        session_id: ne("session_id"),
         since_ms: q.get("since_ms").and_then(|s| s.parse().ok()),
         cache_hit: q.get("cache_hit").and_then(|s| s.parse().ok()),
         search: ne("search"),
@@ -223,6 +265,79 @@ pub async fn logs_rankings(
 pub async fn logs_filterdata(State(state): State<SharedState>) -> Response {
     match state.log_store.filter_values().await {
         Ok(fd) => Json(fd).into_response(),
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// Upper bound on calls returned for one session's journey. A working session rarely tops a
+/// few hundred calls; the cap keeps a pathological session from returning an unbounded body.
+const MAX_SESSION_CALLS: usize = 1_000;
+
+/// `GET /api/sessions?sort=recent|cost|tokens|calls&limit=N&offset=N&<filters>` — grouped
+/// per-session usage summaries (the Sessions list). Same filter params as `/api/logs`.
+pub async fn sessions(
+    State(state): State<SharedState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let filter = filter_from_map(&q);
+    let sort = match q.get("sort").map(String::as_str) {
+        Some("cost") => SessionSort::Cost,
+        Some("tokens") => SessionSort::Tokens,
+        Some("calls") => SessionSort::Calls,
+        _ => SessionSort::LastActivity,
+    };
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_LOG_LIMIT)
+        .min(MAX_LOG_LIMIT);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    match state.log_store.sessions(&filter, sort, limit, offset).await {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// `GET /api/sessions/{id}` — one session's journey: its summary plus every call in it,
+/// oldest first (the order the agent made them). 404 if the session id isn't in the
+/// recent window. Powers the dashboard's session timeline + Sankey diagrams.
+pub async fn session_detail(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    let filter = LogFilter {
+        session_id: Some(id.clone()),
+        ..Default::default()
+    };
+    let summary = match state
+        .log_store
+        .sessions(&filter, SessionSort::LastActivity, 1, 0)
+        .await
+    {
+        Ok(mut page) => page.sessions.pop(),
+        Err(e) => return store_error_response(e),
+    };
+    let Some(summary) = summary else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "message": "session not found", "type": "not_found" }
+            })),
+        )
+            .into_response();
+    };
+    // All calls in the session, oldest → newest (the journey order).
+    let query = LogQuery {
+        filter,
+        limit: MAX_SESSION_CALLS,
+        offset: 0,
+        sort_by: SortBy::CreatedAt,
+        descending: false,
+    };
+    match state.log_store.query(&query).await {
+        Ok(page) => {
+            Json(serde_json::json!({ "summary": summary, "calls": page.logs })).into_response()
+        }
         Err(e) => store_error_response(e),
     }
 }
@@ -457,6 +572,8 @@ pub async fn embeddings(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().embed(&ctx, req).await {
         Ok(resp) => {
@@ -490,6 +607,9 @@ pub async fn chat_completions(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Group this call into its session: the `x-session-id` header wins, else the OpenAI
+    // `user` field (which Claude Code and other clients set to a per-session identifier).
+    ctx.session_id = session_id_from(&headers, req.user.as_deref());
     crate::otel::apply_trace_context(&mut ctx, &headers);
 
     if req.stream.unwrap_or(false) {
@@ -1022,6 +1142,8 @@ pub async fn images_generations(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().image_generate(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "data": resp.data })).into_response(),
@@ -1037,6 +1159,8 @@ pub async fn audio_speech(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().speech(&ctx, req).await {
         Ok(resp) => (
@@ -1080,6 +1204,8 @@ pub async fn audio_transcriptions(
 
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     let req = TranscriptionRequest {
         model,
@@ -1100,6 +1226,8 @@ pub async fn rerank(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().rerank(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "results": resp.results })).into_response(),
@@ -1184,6 +1312,64 @@ mod decode_spans_tests {
         assert_eq!(
             decode_spans(Some("[]")).unwrap().as_array().unwrap().len(),
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn header_wins_over_body_hint() {
+        let h = headers(&[("x-session-id", "from-header")]);
+        assert_eq!(
+            session_id_from(&h, Some("from-body")),
+            Some("from-header".into())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_body_hint_when_no_header() {
+        let h = headers(&[]);
+        assert_eq!(
+            session_id_from(&h, Some("from-body")),
+            Some("from-body".into())
+        );
+    }
+
+    #[test]
+    fn none_when_neither_present() {
+        assert_eq!(session_id_from(&headers(&[]), None), None);
+    }
+
+    #[test]
+    fn blank_header_is_ignored() {
+        // A whitespace-only header must not shadow a real body hint.
+        let h = headers(&[("x-session-id", "   ")]);
+        assert_eq!(session_id_from(&h, Some("body")), Some("body".into()));
+    }
+
+    #[test]
+    fn sanitize_trims_strips_controls_and_caps_length() {
+        assert_eq!(sanitize_session_id("  hi\tthere  "), Some("hithere".into()));
+        assert_eq!(sanitize_session_id("   "), None);
+        assert_eq!(sanitize_session_id(""), None);
+        let long = "x".repeat(500);
+        assert_eq!(
+            sanitize_session_id(&long).unwrap().len(),
+            MAX_SESSION_ID_LEN
         );
     }
 }
@@ -1427,6 +1613,7 @@ mod logs_tests {
             request_id: id.to_string(),
             created_at: 0,
             virtual_key: None,
+            session_id: None,
             provider: provider.to_string(),
             model: "gpt-4".to_string(),
             status,

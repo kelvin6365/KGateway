@@ -160,11 +160,18 @@ fn render(config: &Config, addr: &str, p: &Palette, out: &mut String) {
         p.accent,
         &format!("http://{display_host}"),
     );
+    // Dashboard is a separate Next.js app (ui/), served on port 3000 in dev — not the
+    // backend port. It talks to the gateway via NEXT_PUBLIC_KGATEWAY_URL.
+    let dashboard_host = display_host
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .to_owned();
     row(
         out,
         "Dashboard",
         p.accent,
-        &format!("http://{display_host}/"),
+        &format!("http://{dashboard_host}:3000"),
     );
     row(
         out,
@@ -217,6 +224,8 @@ mod tests {
         assert!(out.contains("KGATEWAY") || out.contains("██"));
         assert!(out.contains(env!("CARGO_PKG_VERSION")));
         assert!(out.contains("http://localhost:8080"));
+        // Dashboard is a separate Next.js app on port 3000, not the backend port.
+        assert!(out.contains("http://localhost:3000"));
         assert!(out.contains("Providers"));
         // One provider registered.
         assert!(out.contains("Providers    1") || out.contains("Providers"));
