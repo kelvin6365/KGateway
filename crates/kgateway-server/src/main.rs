@@ -1,7 +1,7 @@
 //! kgateway-server — the HTTP gateway binary. The implementation lives in the library
 //! crate (`lib.rs`) so integration tests can drive the real router.
 
-use kgateway_server::{app, config};
+use kgateway_server::{app, banner, config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,6 +29,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let port = config.port;
+    // Snapshot for the startup banner before `config` is moved into the engine.
+    let banner_config = config.clone();
     let state = app::build_state(config, config_path.clone()).await;
     let router = app::build_router(state.clone());
 
@@ -63,6 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "kgateway listening");
+    // Cosmetic startup banner (ASCII wordmark + version + config summary) to stdout.
+    banner::print(&banner_config, &addr);
     // Graceful shutdown: stop accepting new connections and drain in-flight requests
     // on SIGINT/SIGTERM (so k8s rollouts and Ctrl-C don't drop live requests).
     axum::serve(listener, router)
