@@ -474,6 +474,136 @@ fn compute_filter_values(logs: &[RequestLog]) -> FilterData {
     }
 }
 
+/// Aggregate view of one session — a group of calls sharing a `session_id`. Powers the
+/// dashboard's Sessions list and the per-session journey header. Computed over the recent
+/// scan window (see [`DEFAULT_SCAN_LIMIT`]), like the other analytics.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// First and last call time in the session (unix ms) — the journey's span.
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub call_count: u64,
+    pub total_tokens: u64,
+    pub total_cost: f64,
+    pub error_count: u64,
+    pub cache_hits: u64,
+    /// Distinct providers and models the session touched (sorted).
+    pub providers: Vec<String>,
+    pub models: Vec<String>,
+    /// The most recently seen virtual key for the session (callers usually reuse one).
+    pub virtual_key: Option<String>,
+}
+
+/// How the session list is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionSort {
+    /// Most recently active first (default).
+    #[default]
+    LastActivity,
+    /// Highest estimated cost first.
+    Cost,
+    /// Most tokens first.
+    Tokens,
+    /// Most calls first.
+    Calls,
+}
+
+/// A page of session summaries plus the pre-pagination total.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPage {
+    pub sessions: Vec<SessionSummary>,
+    pub total: usize,
+}
+
+/// Group logs by `session_id` into per-session aggregates. Logs with no session id are
+/// skipped (they aren't part of any journey).
+fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
+    use std::collections::BTreeSet;
+    struct Acc {
+        first_ts: i64,
+        last_ts: i64,
+        call_count: u64,
+        total_tokens: u64,
+        total_cost: f64,
+        error_count: u64,
+        cache_hits: u64,
+        providers: BTreeSet<String>,
+        models: BTreeSet<String>,
+        virtual_key: Option<String>,
+        vk_at: i64,
+    }
+    let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+    for l in logs {
+        let Some(sid) = &l.session_id else { continue };
+        let a = map.entry(sid.clone()).or_insert_with(|| Acc {
+            first_ts: l.created_at,
+            last_ts: l.created_at,
+            call_count: 0,
+            total_tokens: 0,
+            total_cost: 0.0,
+            error_count: 0,
+            cache_hits: 0,
+            providers: BTreeSet::new(),
+            models: BTreeSet::new(),
+            virtual_key: None,
+            vk_at: i64::MIN,
+        });
+        a.first_ts = a.first_ts.min(l.created_at);
+        a.last_ts = a.last_ts.max(l.created_at);
+        a.call_count += 1;
+        a.total_tokens += l.total_tokens();
+        a.total_cost += l.cost.unwrap_or(0.0);
+        if is_error(l.status) {
+            a.error_count += 1;
+        }
+        if l.cache_hit {
+            a.cache_hits += 1;
+        }
+        a.providers.insert(l.provider.clone());
+        a.models.insert(l.model.clone());
+        // Keep the most recently seen virtual key.
+        if l.created_at >= a.vk_at {
+            a.vk_at = l.created_at;
+            a.virtual_key = l.virtual_key.clone();
+        }
+    }
+    map.into_iter()
+        .map(|(session_id, a)| SessionSummary {
+            session_id,
+            first_ts: a.first_ts,
+            last_ts: a.last_ts,
+            call_count: a.call_count,
+            total_tokens: a.total_tokens,
+            total_cost: a.total_cost,
+            error_count: a.error_count,
+            cache_hits: a.cache_hits,
+            providers: a.providers.into_iter().collect(),
+            models: a.models.into_iter().collect(),
+            virtual_key: a.virtual_key,
+        })
+        .collect()
+}
+
+/// Sort session summaries in place by `sort` (descending), tiebroken by session id for
+/// deterministic output.
+fn sort_sessions(sessions: &mut [SessionSummary], sort: SessionSort) {
+    let score = |s: &SessionSummary| -> f64 {
+        match sort {
+            SessionSort::LastActivity => s.last_ts as f64,
+            SessionSort::Cost => s.total_cost,
+            SessionSort::Tokens => s.total_tokens as f64,
+            SessionSort::Calls => s.call_count as f64,
+        }
+    };
+    sessions.sort_by(|a, b| {
+        score(b)
+            .partial_cmp(&score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+}
+
 /// Max rows a default (non-pushed-down) query scans. Backends that implement `query`
 /// with real SQL should override to avoid this bound.
 const DEFAULT_SCAN_LIMIT: usize = 10_000;
@@ -594,6 +724,24 @@ pub trait LogStore: Send + Sync {
     async fn filter_values(&self) -> Result<FilterData, StoreError> {
         let logs = self.recent(DEFAULT_SCAN_LIMIT).await?;
         Ok(compute_filter_values(&logs))
+    }
+
+    /// Sessions (grouped calls) matching `filter`, ordered by `sort`, paginated. Computed
+    /// over the recent scan window in Rust, like the other analytics — a session that
+    /// scrolled out of the window is not resurrected here.
+    async fn sessions(
+        &self,
+        filter: &LogFilter,
+        sort: SessionSort,
+        limit: usize,
+        offset: usize,
+    ) -> Result<SessionPage, StoreError> {
+        let logs = self.scan_filtered(filter).await?;
+        let mut sessions = compute_sessions(&logs);
+        sort_sessions(&mut sessions, sort);
+        let total = sessions.len();
+        let sessions = sessions.into_iter().skip(offset).take(limit).collect();
+        Ok(SessionPage { sessions, total })
     }
 
     /// Shared helper: fetch the recent window and apply a filter. (Bodies are already

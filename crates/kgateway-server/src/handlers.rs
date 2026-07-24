@@ -14,7 +14,9 @@ use kgateway_core::provider::{
     EmbeddingRequest, ImageGenerationRequest, RerankRequest, SpeechRequest, TranscriptionRequest,
 };
 use kgateway_core::schema::ChatRequest;
-use kgateway_store::{HistogramMetric, LogFilter, LogQuery, RankDimension, RankMetric, SortBy};
+use kgateway_store::{
+    HistogramMetric, LogFilter, LogQuery, RankDimension, RankMetric, SessionSort, SortBy,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -261,6 +263,76 @@ pub async fn logs_rankings(
 pub async fn logs_filterdata(State(state): State<SharedState>) -> Response {
     match state.log_store.filter_values().await {
         Ok(fd) => Json(fd).into_response(),
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// Upper bound on calls returned for one session's journey. A working session rarely tops a
+/// few hundred calls; the cap keeps a pathological session from returning an unbounded body.
+const MAX_SESSION_CALLS: usize = 1_000;
+
+/// `GET /api/sessions?sort=recent|cost|tokens|calls&limit=N&offset=N&<filters>` — grouped
+/// per-session usage summaries (the Sessions list). Same filter params as `/api/logs`.
+pub async fn sessions(
+    State(state): State<SharedState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let filter = filter_from_map(&q);
+    let sort = match q.get("sort").map(String::as_str) {
+        Some("cost") => SessionSort::Cost,
+        Some("tokens") => SessionSort::Tokens,
+        Some("calls") => SessionSort::Calls,
+        _ => SessionSort::LastActivity,
+    };
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_LOG_LIMIT)
+        .min(MAX_LOG_LIMIT);
+    let offset = q.get("offset").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    match state.log_store.sessions(&filter, sort, limit, offset).await {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => store_error_response(e),
+    }
+}
+
+/// `GET /api/sessions/{id}` — one session's journey: its summary plus every call in it,
+/// oldest first (the order the agent made them). 404 if the session id isn't in the
+/// recent window. Powers the dashboard's session timeline + Sankey diagrams.
+pub async fn session_detail(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    let filter = LogFilter {
+        session_id: Some(id.clone()),
+        ..Default::default()
+    };
+    let summary = match state
+        .log_store
+        .sessions(&filter, SessionSort::LastActivity, 1, 0)
+        .await
+    {
+        Ok(mut page) => page.sessions.pop(),
+        Err(e) => return store_error_response(e),
+    };
+    let Some(summary) = summary else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "message": "session not found", "type": "not_found" }
+            })),
+        )
+            .into_response();
+    };
+    // All calls in the session, oldest → newest (the journey order).
+    let query = LogQuery {
+        filter,
+        limit: MAX_SESSION_CALLS,
+        offset: 0,
+        sort_by: SortBy::CreatedAt,
+        descending: false,
+    };
+    match state.log_store.query(&query).await {
+        Ok(page) => {
+            Json(serde_json::json!({ "summary": summary, "calls": page.logs })).into_response()
+        }
         Err(e) => store_error_response(e),
     }
 }

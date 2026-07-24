@@ -718,6 +718,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/logs/rankings", get(handlers::logs_rankings))
         .route("/api/logs/filterdata", get(handlers::logs_filterdata))
         .route("/api/logs/{id}", get(handlers::log_detail))
+        .route("/api/sessions", get(handlers::sessions))
+        .route("/api/sessions/{id}", get(handlers::session_detail))
         .route("/api/mcp/tools", get(handlers::mcp_tools))
         .route("/api/providers", get(handlers::providers))
         .route("/api/config/providers", get(handlers::get_config_providers))

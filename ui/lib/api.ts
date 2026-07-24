@@ -517,6 +517,13 @@ export interface OpenApiSpec {
   openapi: string;
   info: { title: string; version: string; description?: string };
   tags?: { name: string }[];
+  /**
+   * Server base URL(s), resolved by the gateway from `public_url` config (falling back
+   * to the request Host). This is the API domain a caller's SDK should target — which
+   * can differ from the origin the dashboard reaches the gateway at (`BASE_URL`). The
+   * docs page displays and templates examples from `servers[0].url`.
+   */
+  servers?: { url: string }[];
   paths: Record<string, Record<string, OpenApiOperation | undefined>>;
 }
 
