@@ -81,6 +81,7 @@ impl LoggingPlugin {
             request_id: ctx.request_id.to_string(),
             created_at,
             virtual_key: ctx.virtual_key.clone(),
+            session_id: ctx.session_id.clone(),
             provider: record.provider.clone(),
             model: record.model.clone(),
             status: record.status,

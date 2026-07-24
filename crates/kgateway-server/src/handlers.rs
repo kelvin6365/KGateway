@@ -35,6 +35,40 @@ pub(crate) fn vkey_from_headers(headers: &HeaderMap) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Max stored session-id length. A session id is an opaque grouping key shown in the
+/// dashboard, not a lookup into any store, so we only need it bounded — long enough for a
+/// UUID-plus-prefix (Claude Code's `user_…_session_<uuid>`), short enough that a hostile
+/// client can't bloat a log row.
+const MAX_SESSION_ID_LEN: usize = 200;
+
+/// Resolve the session id for a request. Precedence: an explicit `x-session-id` header
+/// wins; otherwise a body-supplied user hint (`body_user` — OpenAI `user`, or the value
+/// derived from Anthropic `metadata.user_id`). Returns `None` when neither is present.
+///
+/// The value is sanitized: trimmed, control characters dropped, and length-capped. It is
+/// a grouping label only and is never forwarded upstream.
+pub(crate) fn session_id_from(headers: &HeaderMap, body_user: Option<&str>) -> Option<String> {
+    let raw = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| body_user.map(|s| s.to_string()))?;
+    sanitize_session_id(&raw)
+}
+
+/// Trim, strip control characters, and length-cap a candidate session id. `None` if empty
+/// after cleaning.
+pub(crate) fn sanitize_session_id(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_SESSION_ID_LEN)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 pub async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -65,6 +99,8 @@ pub struct LogsParams {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub virtual_key: Option<String>,
+    /// Group filter — only calls belonging to this session id (see the Sessions view).
+    pub session_id: Option<String>,
     pub search: Option<String>,
     pub status: Option<u16>,
     pub since_ms: Option<i64>,
@@ -85,6 +121,7 @@ impl LogsParams {
             model: nonempty(&self.model),
             status: self.status,
             virtual_key: nonempty(&self.virtual_key),
+            session_id: nonempty(&self.session_id),
             since_ms: self.since_ms,
             cache_hit: self.cache_hit,
             search: nonempty(&self.search),
@@ -147,6 +184,7 @@ fn filter_from_map(q: &HashMap<String, String>) -> LogFilter {
         model: ne("model"),
         status: q.get("status").and_then(|s| s.parse().ok()),
         virtual_key: ne("virtual_key"),
+        session_id: ne("session_id"),
         since_ms: q.get("since_ms").and_then(|s| s.parse().ok()),
         cache_hit: q.get("cache_hit").and_then(|s| s.parse().ok()),
         search: ne("search"),
@@ -457,6 +495,8 @@ pub async fn embeddings(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().embed(&ctx, req).await {
         Ok(resp) => {
@@ -490,6 +530,9 @@ pub async fn chat_completions(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Group this call into its session: the `x-session-id` header wins, else the OpenAI
+    // `user` field (which Claude Code and other clients set to a per-session identifier).
+    ctx.session_id = session_id_from(&headers, req.user.as_deref());
     crate::otel::apply_trace_context(&mut ctx, &headers);
 
     if req.stream.unwrap_or(false) {
@@ -1022,6 +1065,8 @@ pub async fn images_generations(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().image_generate(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "data": resp.data })).into_response(),
@@ -1037,6 +1082,8 @@ pub async fn audio_speech(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().speech(&ctx, req).await {
         Ok(resp) => (
@@ -1080,6 +1127,8 @@ pub async fn audio_transcriptions(
 
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     let req = TranscriptionRequest {
         model,
@@ -1100,6 +1149,8 @@ pub async fn rerank(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = vkey_from_headers(&headers);
+    // Header-only session grouping for non-chat capabilities (no body user hint).
+    ctx.session_id = session_id_from(&headers, None);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().rerank(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "results": resp.results })).into_response(),
@@ -1427,6 +1478,7 @@ mod logs_tests {
             request_id: id.to_string(),
             created_at: 0,
             virtual_key: None,
+            session_id: None,
             provider: provider.to_string(),
             model: "gpt-4".to_string(),
             status,

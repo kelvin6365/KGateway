@@ -43,6 +43,33 @@ pub struct AnthropicMessagesRequest {
     stream: Option<bool>,
     #[serde(default)]
     tools: Option<Vec<InTool>>,
+    /// Anthropic request `metadata` (e.g. `user_id`). Modeled only so we can group calls
+    /// into a session — Claude Code sets `metadata.user_id` to a per-session identifier.
+    /// Passthrough only; not translated into the outbound request.
+    #[serde(default)]
+    metadata: Option<AnthropicMetadata>,
+}
+
+/// The subset of Anthropic request `metadata` we read. `user_id` is the session hint.
+#[derive(Debug, Deserialize)]
+struct AnthropicMetadata {
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+/// Derive a session id from an Anthropic `metadata.user_id`. Claude Code sends values
+/// shaped like `user_<account-hash>_account__session_<uuid>`; when that shape is present we
+/// key on the `session_<uuid>` tail so distinct sessions of one account stay distinct.
+/// Anything else is used verbatim (sanitized downstream).
+fn derive_session_id(user_id: &str) -> Option<String> {
+    let trimmed = user_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.rfind("session_") {
+        Some(idx) => Some(trimmed[idx..].to_string()),
+        None => Some(trimmed.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,6 +501,14 @@ pub async fn messages(
 ) -> Response {
     let mut ctx = Ctx::new();
     ctx.virtual_key = crate::handlers::vkey_from_headers(&headers);
+    // Group into a session: `x-session-id` header wins, else Claude Code's
+    // `metadata.user_id` (from which we key on the `session_<uuid>` segment).
+    let session_hint = areq
+        .metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_deref())
+        .and_then(derive_session_id);
+    ctx.session_id = crate::handlers::session_id_from(&headers, session_hint.as_deref());
     crate::otel::apply_trace_context(&mut ctx, &headers);
 
     let stream = areq.stream.unwrap_or(false);

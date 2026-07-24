@@ -37,6 +37,12 @@ pub struct RequestLog {
     pub created_at: i64,
     /// The virtual key that made the request, if any.
     pub virtual_key: Option<String>,
+    /// Client-supplied session identifier used to group a working session's many calls
+    /// into one journey. Resolved at ingress (`x-session-id` header, or the OpenAI `user`
+    /// / Anthropic `metadata.user_id` body hint). `None` when the caller sent no hint.
+    /// It's an opaque grouping label, not content — safe to expose and store by default.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub provider: String,
     pub model: String,
     pub status: u16,
@@ -89,6 +95,8 @@ pub struct LogFilter {
     pub model: Option<String>,
     pub status: Option<u16>,
     pub virtual_key: Option<String>,
+    /// Exact session id (groups a session's calls). `None` = no constraint.
+    pub session_id: Option<String>,
     /// created_at >= this (unix ms).
     pub since_ms: Option<i64>,
     /// Only cache hits (Some(true)) / only misses (Some(false)).
@@ -116,6 +124,11 @@ impl LogFilter {
         }
         if let Some(vk) = &self.virtual_key {
             if l.virtual_key.as_deref() != Some(vk.as_str()) {
+                return false;
+            }
+        }
+        if let Some(sid) = &self.session_id {
+            if l.session_id.as_deref() != Some(sid.as_str()) {
                 return false;
             }
         }
@@ -692,6 +705,7 @@ mod tests {
             request_id: id.to_string(),
             created_at,
             virtual_key: None,
+            session_id: None,
             provider: "openai".into(),
             model: "gpt-4o".into(),
             status: 200,
