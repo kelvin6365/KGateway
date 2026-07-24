@@ -56,6 +56,12 @@ export interface RequestLog {
   request_id: string;
   created_at: number; // unix ms
   virtual_key: string | null;
+  /**
+   * Session grouping id, when the caller supplied one (via the `x-session-id` header, or
+   * the OpenAI `user` / Anthropic `metadata.user_id` body hint). Present on both list and
+   * detail responses. Null when the call wasn't part of a tracked session.
+   */
+  session_id: string | null;
   provider: string;
   model: string;
   status: number;
@@ -123,6 +129,8 @@ export interface LogQueryParams {
   model?: string;
   status?: number;
   virtual_key?: string;
+  /** Only calls belonging to this session id (powers the journey view). */
+  session_id?: string;
   cache_hit?: boolean;
   since_ms?: number;
   search?: string;
@@ -362,6 +370,71 @@ export async function getLog(id: string): Promise<RequestLog> {
   });
   if (res.status === 401) throw new Error("admin token required");
   if (res.status === 404) throw new Error("log not found");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/** One row of GET /api/sessions — an aggregate view of a session's calls. */
+export interface SessionSummary {
+  session_id: string;
+  /** First and last call time in the session (unix ms) — the journey's span. */
+  first_ts: number;
+  last_ts: number;
+  call_count: number;
+  total_tokens: number;
+  total_cost: number;
+  error_count: number;
+  cache_hits: number;
+  /** Distinct providers and models the session touched (sorted). */
+  providers: string[];
+  models: string[];
+  virtual_key: string | null;
+}
+
+/** How the session list is ordered (GET /api/sessions `sort`). */
+export type SessionSort = "recent" | "cost" | "tokens" | "calls";
+
+/** Query params accepted by GET /api/sessions — the shared log filters plus sort/paging. */
+export interface SessionQueryParams extends LogStatsFilters {
+  sort?: SessionSort;
+  limit?: number;
+  offset?: number;
+}
+
+/** GET /api/sessions response shape. */
+export interface SessionPage {
+  sessions: SessionSummary[];
+  total: number;
+}
+
+/** GET /api/sessions/{id} response shape — a session's summary plus its ordered calls. */
+export interface SessionDetail {
+  summary: SessionSummary;
+  /** Every call in the session, oldest first (the order the agent made them). */
+  calls: RequestLog[];
+}
+
+/** GET /api/sessions — grouped per-session usage summaries. */
+export async function getSessions(params: SessionQueryParams = {}): Promise<SessionPage> {
+  const qs = toQueryString({ ...params });
+  const res = await fetch(`${BASE_URL}/api/sessions${qs}`, {
+    cache: "no-store",
+    headers: adminHeaders(),
+  });
+  if (res.status === 401) throw new Error("admin token required");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = (await res.json().catch(() => ({}))) as Partial<SessionPage>;
+  return { sessions: body.sessions ?? [], total: body.total ?? 0 };
+}
+
+/** GET /api/sessions/{id} — one session's full journey. Throws if not found (404). */
+export async function getSession(id: string): Promise<SessionDetail> {
+  const res = await fetch(`${BASE_URL}/api/sessions/${encodeURIComponent(id)}`, {
+    cache: "no-store",
+    headers: adminHeaders(),
+  });
+  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 404) throw new Error("session not found");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
