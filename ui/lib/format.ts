@@ -13,6 +13,17 @@ export function formatCount(v: number): string {
   return Math.round(v).toLocaleString();
 }
 
+/** Large counts compacted: 896210 → "896K", 1_240_000 → "1.2M". */
+export function formatCompact(v: number): string {
+  if (v < 1000) return Math.round(v).toString();
+  if (v < 1_000_000) {
+    const k = v / 1000;
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`;
+  }
+  const m = v / 1_000_000;
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`;
+}
+
 /** A duration in ms as a compact human string ("2.4s", "3m 12s", "1h 4m"). */
 export function formatDuration(ms: number): string {
   if (ms < 0) ms = 0;
