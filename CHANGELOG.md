@@ -85,6 +85,18 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Fixed
 
+- **Analytics no longer capped at the last 10,000 requests (SQL push-down).** The SQLite and
+  Postgres log stores now push filtering, sorting, pagination, and every aggregate
+  (`stats`, `histogram`, `timeseries`, `rankings`, `sessions`, `filter_values`) into SQL
+  instead of scanning a fixed 10k-row window and folding in Rust. On a busy gateway that
+  window silently hid older rows and understated dashboard totals (cost, tokens, rankings,
+  session list), capped pagination `total` at 10,000, and made offsets past row 10k return
+  empty. Aggregate SQL mirrors the previous Rust definitions exactly (e.g. success =
+  status ∈ [200,300)). Added secondary indexes on `created_at`, `provider`, `model`,
+  `virtual_key`, `status`, and `session_id` (idempotent `IF NOT EXISTS`, applied on connect)
+  to keep the now-unbounded queries fast, plus SQLite tests that seed >10k rows and prove
+  the ceiling is gone. The in-memory store keeps the scan-based defaults (dev/test only).
+
 - **Startup banner dashboard URL.** The `Dashboard` URL now points at the separate Next.js
   dashboard on port 3000 (matching `docs/08-getting-started.md`), instead of reusing the
   backend listen port. `Listening` is unchanged.

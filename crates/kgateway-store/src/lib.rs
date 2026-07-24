@@ -153,6 +153,106 @@ impl LogFilter {
     }
 }
 
+/// SQL placeholder dialect for [`filter_where`]: Postgres numbers params `$1, $2, …`;
+/// SQLite uses positional `?`.
+#[derive(Clone, Copy)]
+pub(crate) enum PlaceholderStyle {
+    Dollar,
+    Question,
+}
+
+impl PlaceholderStyle {
+    fn at(self, n: usize) -> String {
+        match self {
+            PlaceholderStyle::Dollar => format!("${n}"),
+            PlaceholderStyle::Question => "?".to_string(),
+        }
+    }
+}
+
+/// One bound value for a pushed-down filter, kept dialect-neutral so both DB backends share
+/// [`filter_where`]. The caller replays these onto its `sqlx` query in order.
+pub(crate) enum FilterBind {
+    Text(String),
+    Int(i64),
+    Bool(bool),
+}
+
+/// Build a `WHERE`-clause fragment (each condition led by ` AND `, so it appends after a
+/// `WHERE 1=1` seed) plus the ordered bind list for a [`LogFilter`]. `start_at` is the first
+/// placeholder number (Postgres `$N`; ignored for SQLite `?`). Returns the fragment, the
+/// binds, and the next free placeholder number so the caller can keep numbering its own
+/// params (LIMIT/OFFSET, bucket size, …). This is the SQL twin of [`LogFilter::matches`],
+/// which stays behind for `MemoryLogStore`.
+pub(crate) fn filter_where(
+    filter: &LogFilter,
+    style: PlaceholderStyle,
+    start_at: usize,
+) -> (String, Vec<FilterBind>, usize) {
+    let mut frag = String::new();
+    let mut binds: Vec<FilterBind> = Vec::new();
+    let mut n = start_at;
+
+    if let Some(v) = &filter.provider {
+        frag.push_str(&format!(" AND provider = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Text(v.clone()));
+    }
+    if let Some(v) = &filter.model {
+        frag.push_str(&format!(" AND model = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Text(v.clone()));
+    }
+    if let Some(s) = filter.status {
+        frag.push_str(&format!(" AND status = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Int(s as i64));
+    }
+    if let Some(v) = &filter.virtual_key {
+        frag.push_str(&format!(" AND virtual_key = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Text(v.clone()));
+    }
+    if let Some(v) = &filter.session_id {
+        frag.push_str(&format!(" AND session_id = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Text(v.clone()));
+    }
+    if let Some(since) = filter.since_ms {
+        frag.push_str(&format!(" AND created_at >= {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Int(since));
+    }
+    if let Some(ch) = filter.cache_hit {
+        frag.push_str(&format!(" AND cache_hit = {}", style.at(n)));
+        n += 1;
+        binds.push(FilterBind::Bool(ch));
+    }
+    if let Some(q) = &filter.search {
+        // Case-insensitive substring over request_id / provider / model — the SQL twin of the
+        // `format!("{} {} {}").to_lowercase().contains()` check in `matches`. The term is
+        // bound three times, once per column.
+        let (a, b, c) = (style.at(n), style.at(n + 1), style.at(n + 2));
+        match style {
+            PlaceholderStyle::Dollar => frag.push_str(&format!(
+                " AND (request_id ILIKE '%' || {a} || '%' OR provider ILIKE '%' || {b} || '%' \
+                 OR model ILIKE '%' || {c} || '%')"
+            )),
+            PlaceholderStyle::Question => frag.push_str(&format!(
+                " AND (LOWER(request_id) LIKE '%' || LOWER({a}) || '%' \
+                 OR LOWER(provider) LIKE '%' || LOWER({b}) || '%' \
+                 OR LOWER(model) LIKE '%' || LOWER({c}) || '%')"
+            )),
+        }
+        n += 3;
+        binds.push(FilterBind::Text(q.clone()));
+        binds.push(FilterBind::Text(q.clone()));
+        binds.push(FilterBind::Text(q.clone()));
+    }
+
+    (frag, binds, n)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortBy {
     #[default]
@@ -266,7 +366,7 @@ pub enum HistogramMetric {
 }
 
 impl HistogramMetric {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             HistogramMetric::Latency => "latency",
             HistogramMetric::Cost => "cost",
@@ -341,10 +441,18 @@ fn is_error(status: u16) -> bool {
 
 /// Bin a metric into `buckets` linear buckets between the observed min/max.
 fn compute_histogram(logs: &[RequestLog], metric: HistogramMetric, buckets: usize) -> Histogram {
-    let buckets = buckets.clamp(1, 100);
     let vals: Vec<f64> = logs.iter().map(|l| metric.value(l)).collect();
+    histogram_from_values(metric.name(), vals, buckets)
+}
+
+/// Bin pre-extracted metric values into `buckets` linear buckets between the observed
+/// min/max. Split out of [`compute_histogram`] so the DB backends can push the filter into
+/// SQL, fetch only the scalar column, and reuse the identical binning — no behavior change
+/// for the in-memory path.
+pub(crate) fn histogram_from_values(name: &str, vals: Vec<f64>, buckets: usize) -> Histogram {
+    let buckets = buckets.clamp(1, 100);
     let total = vals.len() as u64;
-    let name = metric.name().to_string();
+    let name = name.to_string();
     if vals.is_empty() {
         return Histogram {
             metric: name,
@@ -637,7 +745,10 @@ pub trait LogStore: Send + Sync {
     /// are fetched only by [`LogStore::get`].
     async fn recent(&self, limit: usize) -> Result<Vec<RequestLog>, StoreError>;
 
-    /// Filtered, sorted, paginated query.
+    /// Filtered, sorted, paginated query. The default scans the recent window and filters in
+    /// Rust (fine for the in-memory store); the SQLite/Postgres backends override this to push
+    /// the filter, sort, and pagination into SQL — and, crucially, return the *true* filtered
+    /// `total` rather than one capped at [`DEFAULT_SCAN_LIMIT`].
     async fn query(&self, q: &LogQuery) -> Result<LogPage, StoreError> {
         let mut all = self.recent(DEFAULT_SCAN_LIMIT).await?;
         all.retain(|l| q.filter.matches(l));
