@@ -8,6 +8,23 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Session journeys.** Requests can now be grouped into a **session** — the full arc of one
+  agent's AI usage (e.g. a Claude Code CLI run), instead of scattered log rows. The gateway
+  resolves a session id at ingress: the `x-session-id` header wins, else it derives one from the
+  OpenAI `user` field or Claude Code's Anthropic `metadata.user_id` (keying on the
+  `session_<uuid>` segment) — so Claude Code groups automatically with no client change. The id
+  is threaded through the request context (including the streaming deferred-capture path) into a
+  new `session_id` log column (SQLite + Postgres, with idempotent `ALTER TABLE` migrations); it's
+  an opaque grouping label, never request content, so it's stored unconditionally.
+
+  Two new endpoints back the view: **`GET /api/sessions`** (grouped summaries — call count,
+  tokens, cost, errors, cache hits, models/providers touched, and the session's time span; sorted
+  by recency/cost/tokens/calls) and **`GET /api/sessions/{id}`** (a session's summary plus every
+  call, oldest first). The dashboard gains a **Sessions** page and a per-session **journey** view:
+  a Provider→Model→Outcome **Sankey** (weightable by calls / tokens / cost), a model→model
+  transition Sankey, a chronological call timeline, and an expandable call list that reuses the
+  trace waterfall. Grouping is computed over the recent log window, like the other analytics.
+
 - **Startup banner.** On boot the server prints an ASCII wordmark plus a one-glance summary of
   the running gateway — version/MSRV/os-arch, the bound listen + dashboard URLs, and the salient
   config (provider count, storage backend, admin-API auth state, virtual-key count, semantic
@@ -67,6 +84,10 @@ collected under a single `Unreleased` section until the first tagged release.
   admin token, so the picker is useful for non-admin users too.
 
 ### Fixed
+
+- **Startup banner dashboard URL.** The `Dashboard` URL now points at the separate Next.js
+  dashboard on port 3000 (matching `docs/08-getting-started.md`), instead of reusing the
+  backend listen port. `Listening` is unchanged.
 
 - **Anthropic streamed tool-calls now covered by tests.** The connector's
   `content_block_start` → tool id/name and `input_json_delta` → argument-fragment mapping
