@@ -57,6 +57,7 @@ function layout(
   width: number,
   height: number,
   formatValue: (v: number) => string,
+  nodeColors?: Record<string, string>,
 ): Laid | null {
   const ids = nodes.map((n) => n.id);
   const idSet = new Set(ids);
@@ -151,7 +152,9 @@ function layout(
       // origin across the diagram.
       const src = dominantSource.get(id);
       const color =
-        (src && colorFor.get(src)) || NODE_COLORS[colorIdx++ % NODE_COLORS.length];
+        nodeColors?.[id] ||
+        (src && colorFor.get(src)) ||
+        NODE_COLORS[colorIdx++ % NODE_COLORS.length];
       colorFor.set(id, color);
       pos.set(id, { x, y, h, color });
       y += h + gap;
@@ -181,7 +184,9 @@ function layout(
         key: `${l.source}->${l.target}-${i}`,
         d: `M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1}`,
         width: w,
-        color: s.color,
+        // A semantically-colored target (e.g. an error/cache outcome) tints the ribbon into
+        // it, so a big red flow into "error" is unmissable; otherwise inherit the source.
+        color: nodeColors?.[l.target] ?? s.color,
         title: `${labelOf(l.source)} → ${labelOf(l.target)}: ${formatValue(l.value)}`,
       };
     });
@@ -201,16 +206,19 @@ export function Sankey({
   links,
   height = 260,
   formatValue = (v) => v.toLocaleString(),
+  nodeColors,
 }: {
   nodes: SankeyNode[];
   links: SankeyLink[];
   height?: number;
   formatValue?: (v: number) => string;
+  /** Optional explicit color per node id (e.g. semantic outcome colors). */
+  nodeColors?: Record<string, string>;
 }) {
   const width = 720;
   const laid = useMemo(
-    () => layout(nodes, links, width, height, formatValue),
-    [nodes, links, height, formatValue],
+    () => layout(nodes, links, width, height, formatValue, nodeColors),
+    [nodes, links, height, formatValue, nodeColors],
   );
 
   if (!laid) {

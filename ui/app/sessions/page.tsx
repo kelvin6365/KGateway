@@ -163,9 +163,18 @@ function CopyId({ id }: { id: string }) {
   );
 }
 
-function Chip({ children, tone }: { children: React.ReactNode; tone?: string }) {
+function Chip({
+  children,
+  tone,
+  title,
+}: {
+  children: React.ReactNode;
+  tone?: string;
+  title?: string;
+}) {
   return (
     <span
+      title={title}
       className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium"
       style={
         tone
@@ -221,9 +230,13 @@ function SessionCard({
             <span className="text-[11px] text-muted-foreground">+{s.models.length - 1}</span>
           )}
           <Chip>{s.virtual_key ?? "anonymous"}</Chip>
-          {ins.live && <Chip tone="var(--success)">live</Chip>}
+          {ins.live && (
+            <Chip tone="var(--success)" title="A call landed in the last 5 minutes">
+              active
+            </Chip>
+          )}
           {ins.busy && (
-            <Chip tone="var(--warning)">
+            <Chip tone="var(--warning)" title="High call rate — a burst or possible runaway loop">
               <Repeat size={9} /> high activity
             </Chip>
           )}
