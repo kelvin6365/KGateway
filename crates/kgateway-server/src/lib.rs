@@ -7,6 +7,7 @@ pub mod api_catalog;
 pub mod api_docs;
 pub mod app;
 pub mod auth;
+pub mod banner;
 pub mod config;
 pub mod handlers;
 pub mod metrics;

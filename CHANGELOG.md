@@ -8,6 +8,14 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Startup banner.** On boot the server prints an ASCII wordmark plus a one-glance summary of
+  the running gateway — version/MSRV/os-arch, the bound listen + dashboard URLs, and the salient
+  config (provider count, storage backend, admin-API auth state, virtual-key count, semantic
+  cache, MCP gateway). It writes to stdout (so it stays legible with `RUST_LOG` turned down) once
+  the listener binds, so it only appears on a successful start. Colour auto-disables when stdout
+  is not a TTY or `NO_COLOR` is set. It reports presence only — never a token, DB URL, or other
+  secret. New `kgateway_server::banner`.
+
 - **Generated API reference + agent-readable docs.** A new `api_catalog` module lists every
   endpoint the gateway serves — method, path, auth tier, parameters, and a runnable example —
   and four surfaces render from it: **`GET /openapi.json`** (OpenAPI 3.1, so the API also
