@@ -537,6 +537,49 @@ mod tests {
     }
 
     #[test]
+    fn derive_session_id_extracts_claude_code_session_segment() {
+        // Claude Code's `metadata.user_id` shape → key on the session_ tail.
+        assert_eq!(
+            derive_session_id("user_abc123_account__session_9f8e7d6c"),
+            Some("session_9f8e7d6c".into())
+        );
+    }
+
+    #[test]
+    fn derive_session_id_uses_plain_value_verbatim() {
+        assert_eq!(derive_session_id("just-a-user"), Some("just-a-user".into()));
+        assert_eq!(derive_session_id("  "), None);
+    }
+
+    #[test]
+    fn metadata_user_id_is_captured_and_derived() {
+        // The `metadata` object must survive deserialization (previously it was dropped),
+        // and its user_id must resolve to the session segment.
+        let areq = req(json!({
+            "model": "anthropic/claude",
+            "max_tokens": 10,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "metadata": { "user_id": "user_x_account__session_deadbeef" },
+        }));
+        let hint = areq
+            .metadata
+            .as_ref()
+            .and_then(|m| m.user_id.as_deref())
+            .and_then(derive_session_id);
+        assert_eq!(hint, Some("session_deadbeef".into()));
+    }
+
+    #[test]
+    fn missing_metadata_is_none() {
+        let areq = req(json!({
+            "model": "anthropic/claude",
+            "max_tokens": 10,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }));
+        assert!(areq.metadata.is_none());
+    }
+
+    #[test]
     fn translates_system_and_text_messages() {
         let cr = to_chat_request(req(json!({
             "model": "zai/glm-4.6",

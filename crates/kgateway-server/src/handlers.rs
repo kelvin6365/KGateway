@@ -54,6 +54,8 @@ pub(crate) fn session_id_from(headers: &HeaderMap, body_user: Option<&str>) -> O
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
+        // A blank header must not shadow a real body hint — fall through to it.
+        .filter(|s| !s.trim().is_empty())
         .or_else(|| body_user.map(|s| s.to_string()))?;
     sanitize_session_id(&raw)
 }
@@ -289,7 +291,10 @@ pub async fn sessions(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_LOG_LIMIT)
         .min(MAX_LOG_LIMIT);
-    let offset = q.get("offset").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
     match state.log_store.sessions(&filter, sort, limit, offset).await {
         Ok(page) => Json(page).into_response(),
         Err(e) => store_error_response(e),
@@ -1307,6 +1312,64 @@ mod decode_spans_tests {
         assert_eq!(
             decode_spans(Some("[]")).unwrap().as_array().unwrap().len(),
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn header_wins_over_body_hint() {
+        let h = headers(&[("x-session-id", "from-header")]);
+        assert_eq!(
+            session_id_from(&h, Some("from-body")),
+            Some("from-header".into())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_body_hint_when_no_header() {
+        let h = headers(&[]);
+        assert_eq!(
+            session_id_from(&h, Some("from-body")),
+            Some("from-body".into())
+        );
+    }
+
+    #[test]
+    fn none_when_neither_present() {
+        assert_eq!(session_id_from(&headers(&[]), None), None);
+    }
+
+    #[test]
+    fn blank_header_is_ignored() {
+        // A whitespace-only header must not shadow a real body hint.
+        let h = headers(&[("x-session-id", "   ")]);
+        assert_eq!(session_id_from(&h, Some("body")), Some("body".into()));
+    }
+
+    #[test]
+    fn sanitize_trims_strips_controls_and_caps_length() {
+        assert_eq!(sanitize_session_id("  hi\tthere  "), Some("hithere".into()));
+        assert_eq!(sanitize_session_id("   "), None);
+        assert_eq!(sanitize_session_id(""), None);
+        let long = "x".repeat(500);
+        assert_eq!(
+            sanitize_session_id(&long).unwrap().len(),
+            MAX_SESSION_ID_LEN
         );
     }
 }

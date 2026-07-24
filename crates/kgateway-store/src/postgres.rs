@@ -156,7 +156,8 @@ impl From<RequestLogRow> for RequestLog {
 
 /// Column list for the lean list/`recent` query. Body columns are selected as typed NULL
 /// literals so large captured payloads are never read on the hot list path.
-const LIST_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, provider, model, status, \
+const LIST_COLUMNS: &str =
+    "request_id, created_at, virtual_key, session_id, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, CAST(NULL AS TEXT) AS request_body, CAST(NULL AS TEXT) AS response_body, \
      CAST(NULL AS TEXT) AS spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
@@ -169,7 +170,8 @@ const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, p
 
 /// Reveal column list: everything including the encrypted mapping. Used ONLY by
 /// `get_with_mapping` behind the `logs:reveal` gate.
-const REVEAL_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, provider, model, status, \
+const REVEAL_COLUMNS: &str =
+    "request_id, created_at, virtual_key, session_id, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, request_body, response_body, spans, redacted, redaction_mapping";
 
