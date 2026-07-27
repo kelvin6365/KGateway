@@ -4,7 +4,7 @@
 
 ## Docker (primary)
 
-The [`Dockerfile`](../Dockerfile) at the repo root is a multi-stage build (`rust:1.85-slim`
+The [`Dockerfile`](../Dockerfile) at the repo root is a multi-stage build (`rust:1-slim-bookworm`
 builder → `debian:bookworm-slim` runtime) producing a stripped binary that runs as a non-root
 user. No libpq/libsqlite in the runtime image — sqlx bundles SQLite + uses the pure-Rust
 Postgres driver and reqwest uses rustls, so only CA certificates are needed. A

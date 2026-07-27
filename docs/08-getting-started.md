@@ -4,7 +4,7 @@ A 5-minute guide to running KGateway locally, sending your first request, and op
 
 ## Prerequisites
 
-- **Rust** 1.85+ (`rustc --version`)
+- **Rust** 1.88+ (`rustc --version`)
 - **Node** 22+ and **pnpm** (for the dashboard)
 - A provider API key (e.g. `OPENAI_API_KEY`)
 - Optional: **Docker** / **Helm** for containerized deploys
