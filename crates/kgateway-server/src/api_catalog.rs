@@ -520,8 +520,10 @@ dashboard's filter dropdowns offer real options.",
         summary: "Sessions — grouped AI-usage journeys",
         description: "Groups the request log by session id (from the `x-session-id` header, or the \
 OpenAI `user` / Anthropic `metadata.user_id` body hint) into per-session summaries: call count, \
-tokens, cost, error count, cache hits, the models and providers touched, and the session's time span. \
-Grouping is computed over the recent log window.",
+tokens, cost, error count, cache hits, the models and providers touched, the session's time span, \
+and the most recently seen client `user_agent`. The response also carries a top-level `unidentified` \
+bucket aggregating calls that sent no session id (count, last timestamp, error count, latest \
+user agent), so session-less traffic stays visible. Grouping is computed over the recent log window.",
         params: &[
             Param { name: "sort", location: "query", ty: "string", required: false, description: "`recent` (default, last activity) | `cost` | `tokens` | `calls`." },
             Param { name: "limit", location: "query", ty: "integer", required: false, description: "Page size, capped at 200. Default 50." },

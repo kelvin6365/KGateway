@@ -41,6 +41,10 @@ pub struct Ctx {
     /// key = every session of its holder) this distinguishes individual sessions. `None`
     /// when the caller sends no hint.
     pub session_id: Option<String>,
+    /// Client `User-Agent` header, captured at ingress so the audit log can show *what*
+    /// is connecting (a CLI, an SDK, a browser). Sanitized and length-capped at ingress;
+    /// a diagnostic label only — never forwarded upstream.
+    pub user_agent: Option<String>,
     pub attempt: u32,
     pub started_at: Instant,
     /// Trace spans for this request's waterfall. Behind a mutex because most of
@@ -57,6 +61,7 @@ impl Ctx {
             request_id: RequestId::new(),
             virtual_key: None,
             session_id: None,
+            user_agent: None,
             attempt: 0,
             started_at: Instant::now(),
             spans: Arc::new(SpanCollector::new()),

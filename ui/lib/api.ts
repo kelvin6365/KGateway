@@ -62,6 +62,8 @@ export interface RequestLog {
    * detail responses. Null when the call wasn't part of a tracked session.
    */
   session_id: string | null;
+  /** Client `User-Agent` at ingress (sanitized) — what kind of client made the call. */
+  user_agent?: string | null;
   provider: string;
   model: string;
   status: number;
@@ -389,6 +391,8 @@ export interface SessionSummary {
   providers: string[];
   models: string[];
   virtual_key: string | null;
+  /** Most recently seen client `User-Agent` for the session — what is connecting. */
+  user_agent: string | null;
 }
 
 /** How the session list is ordered (GET /api/sessions `sort`). */
@@ -401,10 +405,22 @@ export interface SessionQueryParams extends LogStatsFilters {
   offset?: number;
 }
 
+/** Aggregate of calls that carried no session id — traffic invisible to the session list. */
+export interface UnidentifiedTraffic {
+  call_count: number;
+  /** Most recent call time (unix ms), null when there are no such calls. */
+  last_ts: number | null;
+  error_count: number;
+  /** Most recently seen client `User-Agent` among session-less calls. */
+  user_agent: string | null;
+}
+
 /** GET /api/sessions response shape. */
 export interface SessionPage {
   sessions: SessionSummary[];
   total: number;
+  /** Session-less traffic in the same filter window, so unknown clients stay visible. */
+  unidentified?: UnidentifiedTraffic;
 }
 
 /** GET /api/sessions/{id} response shape — a session's summary plus its ordered calls. */
@@ -424,7 +440,7 @@ export async function getSessions(params: SessionQueryParams = {}): Promise<Sess
   if (res.status === 401) throw new Error("admin token required");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<SessionPage>;
-  return { sessions: body.sessions ?? [], total: body.total ?? 0 };
+  return { sessions: body.sessions ?? [], total: body.total ?? 0, unidentified: body.unidentified };
 }
 
 /** GET /api/sessions/{id} — one session's full journey. Throws if not found (404). */

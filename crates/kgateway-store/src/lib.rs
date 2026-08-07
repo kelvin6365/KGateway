@@ -43,6 +43,11 @@ pub struct RequestLog {
     /// It's an opaque grouping label, not content — safe to expose and store by default.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Client `User-Agent` at ingress — what connected (a CLI, an SDK, a browser).
+    /// Sanitized and length-capped at ingress. Like `session_id`, an opaque diagnostic
+    /// label, not content — safe to store and expose by default.
+    #[serde(default)]
+    pub user_agent: Option<String>,
     pub provider: String,
     pub model: String,
     pub status: u16,
@@ -601,6 +606,8 @@ pub struct SessionSummary {
     pub models: Vec<String>,
     /// The most recently seen virtual key for the session (callers usually reuse one).
     pub virtual_key: Option<String>,
+    /// The most recently seen client `User-Agent` for the session — what is connecting.
+    pub user_agent: Option<String>,
 }
 
 /// How the session list is ordered.
@@ -622,6 +629,41 @@ pub enum SessionSort {
 pub struct SessionPage {
     pub sessions: Vec<SessionSummary>,
     pub total: usize,
+    /// Traffic in the same filter window that carried no session id — surfaced so
+    /// "strange" connections (clients that send no session hint) can't hide.
+    pub unidentified: UnidentifiedTraffic,
+}
+
+/// Aggregate of calls with no `session_id` — invisible to the per-session list, but
+/// exactly the traffic an operator wants to notice (an unknown client, a misconfigured
+/// caller). Windowed by the same `LogFilter` as the session list.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UnidentifiedTraffic {
+    pub call_count: u64,
+    /// Most recent call time (unix ms), `None` when there are no such calls.
+    pub last_ts: Option<i64>,
+    pub error_count: u64,
+    /// Most recently seen client `User-Agent` among session-less calls.
+    pub user_agent: Option<String>,
+}
+
+/// Aggregate the calls that carry no `session_id` (the complement of
+/// [`compute_sessions`]) into an [`UnidentifiedTraffic`] bucket.
+fn compute_unidentified(logs: &[RequestLog]) -> UnidentifiedTraffic {
+    let mut bucket = UnidentifiedTraffic::default();
+    let mut ua_at = i64::MIN;
+    for l in logs.iter().filter(|l| l.session_id.is_none()) {
+        bucket.call_count += 1;
+        bucket.last_ts = Some(bucket.last_ts.unwrap_or(l.created_at).max(l.created_at));
+        if is_error(l.status) {
+            bucket.error_count += 1;
+        }
+        if l.user_agent.is_some() && l.created_at >= ua_at {
+            ua_at = l.created_at;
+            bucket.user_agent = l.user_agent.clone();
+        }
+    }
+    bucket
 }
 
 /// Group logs by `session_id` into per-session aggregates. Logs with no session id are
@@ -640,6 +682,8 @@ fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
         models: BTreeSet<String>,
         virtual_key: Option<String>,
         vk_at: i64,
+        user_agent: Option<String>,
+        ua_at: i64,
     }
     let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
     for l in logs {
@@ -656,6 +700,8 @@ fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
             models: BTreeSet::new(),
             virtual_key: None,
             vk_at: i64::MIN,
+            user_agent: None,
+            ua_at: i64::MIN,
         });
         a.first_ts = a.first_ts.min(l.created_at);
         a.last_ts = a.last_ts.max(l.created_at);
@@ -675,6 +721,12 @@ fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
             a.vk_at = l.created_at;
             a.virtual_key = l.virtual_key.clone();
         }
+        // Keep the most recently seen User-Agent; a `None` never displaces a known one
+        // (a client that omits the header mid-session shouldn't erase what we know).
+        if l.user_agent.is_some() && l.created_at >= a.ua_at {
+            a.ua_at = l.created_at;
+            a.user_agent = l.user_agent.clone();
+        }
     }
     map.into_iter()
         .map(|(session_id, a)| SessionSummary {
@@ -689,6 +741,7 @@ fn compute_sessions(logs: &[RequestLog]) -> Vec<SessionSummary> {
             providers: a.providers.into_iter().collect(),
             models: a.models.into_iter().collect(),
             virtual_key: a.virtual_key,
+            user_agent: a.user_agent,
         })
         .collect()
 }
@@ -852,7 +905,12 @@ pub trait LogStore: Send + Sync {
         sort_sessions(&mut sessions, sort);
         let total = sessions.len();
         let sessions = sessions.into_iter().skip(offset).take(limit).collect();
-        Ok(SessionPage { sessions, total })
+        let unidentified = compute_unidentified(&logs);
+        Ok(SessionPage {
+            sessions,
+            total,
+            unidentified,
+        })
     }
 
     /// Shared helper: fetch the recent window and apply a filter. (Bodies are already
@@ -965,6 +1023,7 @@ mod tests {
             created_at,
             virtual_key: None,
             session_id: None,
+            user_agent: None,
             provider: "openai".into(),
             model: "gpt-4o".into(),
             status: 200,
@@ -1171,6 +1230,76 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].error_count, 1);
         assert_eq!(sessions[0].cache_hits, 1);
+    }
+
+    #[test]
+    fn compute_sessions_keeps_latest_user_agent() {
+        let ua = |l: RequestLog, ua: Option<&str>| RequestLog {
+            user_agent: ua.map(str::to_string),
+            ..l
+        };
+        let logs = vec![
+            ua(
+                sess_log("a", 100, Some("s1"), "openai", "gpt-4o", 0, 0.0),
+                Some("curl/8.0"),
+            ),
+            ua(
+                sess_log("b", 200, Some("s1"), "openai", "gpt-4o", 0, 0.0),
+                Some("claude-cli/1.0"),
+            ),
+            // A later call WITHOUT the header must not erase the known agent.
+            ua(
+                sess_log("c", 300, Some("s1"), "openai", "gpt-4o", 0, 0.0),
+                None,
+            ),
+        ];
+        let sessions = compute_sessions(&logs);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].user_agent.as_deref(), Some("claude-cli/1.0"));
+    }
+
+    #[tokio::test]
+    async fn store_sessions_reports_unidentified_bucket() {
+        let store = MemoryLogStore::default();
+        for l in [
+            sess_log("a", 100, Some("s1"), "openai", "gpt-4o", 10, 0.01),
+            // Session-less traffic: two calls, one an error, latest UA wins.
+            RequestLog {
+                user_agent: Some("python-requests/2.31".into()),
+                ..sess_log("b", 200, None, "openai", "gpt-4o", 0, 0.0)
+            },
+            RequestLog {
+                status: 500,
+                user_agent: None,
+                ..sess_log("c", 300, None, "openai", "gpt-4o", 0, 0.0)
+            },
+        ] {
+            store.append(l).await.unwrap();
+        }
+
+        let page = store
+            .sessions(&LogFilter::default(), SessionSort::LastActivity, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1, "only s1 is an identified session");
+        let u = &page.unidentified;
+        assert_eq!(u.call_count, 2);
+        assert_eq!(u.last_ts, Some(300));
+        assert_eq!(u.error_count, 1);
+        assert_eq!(u.user_agent.as_deref(), Some("python-requests/2.31"));
+
+        // The bucket honors the filter window: since_ms past both calls → empty.
+        let recent = LogFilter {
+            since_ms: Some(400),
+            ..Default::default()
+        };
+        let page = store
+            .sessions(&recent, SessionSort::LastActivity, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(page.unidentified.call_count, 0);
+        assert_eq!(page.unidentified.last_ts, None);
+        assert_eq!(page.unidentified.user_agent, None);
     }
 
     #[test]

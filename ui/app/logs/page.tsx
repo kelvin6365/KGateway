@@ -23,6 +23,8 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { statusColor } from "@/lib/status";
+import { formatDateTime } from "@/lib/format";
+import { sinceMsForRange } from "@/lib/time";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -75,21 +77,6 @@ const TIME_RANGES: { value: TimeRange; label: string }[] = [
   { value: "all", label: "All" },
 ];
 
-function timeRangeToSinceMs(range: TimeRange): number | undefined {
-  const now = Date.now();
-  switch (range) {
-    case "15m":
-      return now - 15 * 60 * 1000;
-    case "1h":
-      return now - 60 * 60 * 1000;
-    case "24h":
-      return now - 24 * 60 * 60 * 1000;
-    case "all":
-    default:
-      return undefined;
-  }
-}
-
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -102,10 +89,6 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 function formatCost(cost: number | null | undefined): string {
   if (cost === null || cost === undefined) return "—";
   return `$${cost.toFixed(4)}`;
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleString();
 }
 
 function StatTile({ label, value, note }: { label: string; value: string; note?: string }) {
@@ -324,7 +307,7 @@ function LogsPageContent() {
   const debouncedStatus = useDebouncedValue(status, 300);
   const debouncedSearch = useDebouncedValue(search, 300);
 
-  const sinceMs = useMemo(() => timeRangeToSinceMs(timeRange), [timeRange]);
+  const sinceMs = useMemo(() => sinceMsForRange(timeRange), [timeRange]);
 
   // --- sort + paging ---
   const [sortBy, setSortBy] = useState<LogSortBy>("created_at");
@@ -887,7 +870,7 @@ function LogsPageContent() {
                       onClick={() => openDetail(l)}
                     >
                       <TableCell className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                        {formatTime(l.created_at)}
+                        {formatDateTime(l.created_at)}
                       </TableCell>
                       <TableCell className="px-4 py-3">{l.provider}</TableCell>
                       <TableCell className="px-4 py-3 font-medium">{l.model}</TableCell>
@@ -994,7 +977,7 @@ function LogsPageContent() {
             <DialogTitle>Request trace</DialogTitle>
             <span className="font-mono text-[11px] break-all text-muted-foreground">
               {requestParam}
-              {selectedLog && ` · ${formatTime(selectedLog.created_at)}`}
+              {selectedLog && ` · ${formatDateTime(selectedLog.created_at)}`}
             </span>
           </DialogHeader>
           {!selectedLog && (

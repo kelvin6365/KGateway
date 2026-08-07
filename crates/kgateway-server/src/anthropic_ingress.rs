@@ -557,6 +557,7 @@ pub async fn messages(
         .and_then(|m| m.user_id.as_deref())
         .and_then(derive_session_id);
     ctx.session_id = crate::handlers::session_id_from(&headers, session_hint.as_deref());
+    ctx.user_agent = crate::handlers::user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
 
     let stream = areq.stream.unwrap_or(false);

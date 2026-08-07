@@ -199,6 +199,9 @@ struct StreamCaptureGuard {
     /// Snapshot of the request's session id, restored onto the reconstructed `Ctx` so the
     /// deferred audit record is grouped into the right session (mirrors `virtual_key`).
     session_id: Option<String>,
+    /// Snapshot of the client's User-Agent, restored like `session_id` so a streamed
+    /// request's audit record still says what was connecting.
+    user_agent: Option<String>,
     started_at: std::time::Instant,
     model_full: String,
     req_body: Option<String>,
@@ -315,6 +318,7 @@ impl Drop for StreamCaptureGuard {
         let request_id = self.request_id;
         let virtual_key = self.virtual_key.take();
         let session_id = self.session_id.take();
+        let user_agent = self.user_agent.take();
         let started_at = self.started_at;
         let spans = self.spans.clone();
         // Split the stream into TTFT (already recorded at dispatch) and body transfer, so
@@ -363,6 +367,7 @@ impl Drop for StreamCaptureGuard {
             c.request_id = request_id;
             c.virtual_key = virtual_key;
             c.session_id = session_id;
+            c.user_agent = user_agent;
             c.started_at = started_at;
             c.spans = spans;
             for o in &observers {
@@ -1092,6 +1097,7 @@ impl Kgateway {
             request_id: ctx.request_id,
             virtual_key: ctx.virtual_key.clone(),
             session_id: ctx.session_id.clone(),
+            user_agent: ctx.user_agent.clone(),
             started_at: ctx.started_at,
             model_full,
             req_body,
@@ -1959,6 +1965,59 @@ mod tests {
             names.iter().any(|n| n.starts_with("stream.ttft")),
             "the streamed audit record must carry the trace, incl. time-to-first-token: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_guard_restores_session_id_and_user_agent() {
+        // The deferred stream guard rebuilds a `Ctx` after the borrow is gone; every
+        // identity field must be snapshotted or streamed requests silently lose it.
+        use crate::observer::CallRecord;
+        use std::sync::Mutex;
+
+        type SeenIdentity = Option<(Option<String>, Option<String>)>;
+
+        #[derive(Default)]
+        struct IdentityCapturingObserver {
+            seen: Arc<Mutex<SeenIdentity>>,
+        }
+        #[async_trait]
+        impl RequestObserver for IdentityCapturingObserver {
+            fn name(&self) -> &str {
+                "identity-capture"
+            }
+            async fn on_response(&self, ctx: &Ctx, _rec: &CallRecord) {
+                *self.seen.lock().unwrap() = Some((ctx.session_id.clone(), ctx.user_agent.clone()));
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(None));
+        let mut registry = Registry::new();
+        registry.register(Arc::new(StreamProvider), vec![key("k")]);
+        let engine = Kgateway::new(registry)
+            .with_observer(Arc::new(IdentityCapturingObserver { seen: seen.clone() }));
+
+        let mut ctx = Ctx::new();
+        ctx.session_id = Some("sess-1".into());
+        ctx.user_agent = Some("claude-cli/1.0".into());
+        let stream = engine
+            .chat_stream(&mut ctx, req())
+            .await
+            .expect("stream opens");
+        let _: Vec<_> = stream.collect().await;
+        for _ in 0..50 {
+            if seen.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let got = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("deferred record emitted");
+        assert_eq!(got.0.as_deref(), Some("sess-1"));
+        assert_eq!(got.1.as_deref(), Some("claude-cli/1.0"));
     }
 
     #[tokio::test]

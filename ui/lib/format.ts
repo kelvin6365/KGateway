@@ -65,3 +65,19 @@ export function formatClock(ts: number): string {
     second: "2-digit",
   });
 }
+
+/**
+ * Absolute date + time for a unix-ms timestamp, in the viewer's local zone.
+ * The single formatter for full timestamps (log rows, detail sheets, cache
+ * entries) so every page renders them identically.
+ */
+export function formatDateTime(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}

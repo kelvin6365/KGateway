@@ -20,6 +20,7 @@ import {
   getMcpTools,
   getProviders,
   getRankings,
+  getSessions,
   getTimeseries,
   getVirtualKeys,
   health,
@@ -45,6 +46,10 @@ import { useCountUp } from "@/components/baroque/use-count-up";
 import { useStaggerReveal } from "@/components/baroque/use-reveal";
 import { bucketMsForRange, sinceMsForRange, type TimeRange } from "@/lib/time";
 import { statusColor } from "@/lib/status";
+import { formatDateTime, formatRelative } from "@/lib/format";
+import { useNow } from "@/lib/use-now";
+import { clientLabel, maskKey, UNKNOWN_CLIENT } from "@/lib/client-names";
+import { insight, overview, type SessionHealth } from "@/lib/session-insights";
 
 const STATS_POLL_MS = 15000;
 const ERRORS_POLL_MS = 10000;
@@ -164,7 +169,7 @@ function RecentErrors({ errors, loading }: { errors: RequestLog[]; loading: bool
                   {l.status}
                 </span>
                 <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
-                  {new Date(l.created_at).toLocaleString()}
+                  {formatDateTime(l.created_at)}
                 </span>
                 <span className="shrink-0 font-medium">
                   {l.provider}/{l.model}
@@ -179,6 +184,149 @@ function RecentErrors({ errors, loading }: { errors: RequestLog[]; loading: bool
       </CardContent>
     </Card>
   );
+}
+
+/** A session counts as "connected" when it called through the gateway in this window. */
+const CONNECTED_WINDOW_MS = 60 * 60 * 1000;
+const SESSIONS_POLL_MS = 10000;
+const MAX_CLIENT_ROWS = 6;
+
+const HEALTH_COLOR: Record<SessionHealth, string> = {
+  error: "var(--error)",
+  live: "var(--success)",
+  busy: "var(--warning)",
+  idle: "var(--muted-foreground)",
+};
+
+/**
+ * Who is connected right now: sessions seen in the last hour, labeled by client
+ * (User-Agent), with a live/quiet signal per row and a bucket for traffic that sent no
+ * session id — the connections worth noticing precisely because they're unidentified.
+ */
+function ConnectedClients() {
+  const now = useNow(30000);
+  const { data, isLoading } = useQuery({
+    // `since_ms` is computed inside queryFn so the queryKey stays stable across renders.
+    queryKey: ["sessions-connected"],
+    queryFn: () =>
+      getSessions({ sort: "recent", limit: 100, since_ms: Date.now() - CONNECTED_WINDOW_MS }),
+    retry: false,
+    refetchInterval: SESSIONS_POLL_MS,
+    placeholderData: (prev) => prev,
+  });
+
+  const sessions = useMemo(() => data?.sessions ?? [], [data]);
+  const active = overview(sessions, data?.total ?? 0, now).active;
+  const rows = useMemo(
+    () => [...sessions].sort((a, b) => b.last_ts - a.last_ts).slice(0, MAX_CLIENT_ROWS),
+    [sessions],
+  );
+  const unidentified = data?.unidentified;
+  const quietMinutes = (lastTs: number) => Math.max(1, Math.round((now - lastTs) / 60000));
+
+  return (
+    <Card className="gap-3 py-4">
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Connected clients
+            <span className="inline-flex items-center gap-1 normal-case tracking-normal">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ background: active > 0 ? "var(--success)" : "var(--muted-foreground)" }}
+                aria-hidden
+              />
+              {active} active now
+            </span>
+          </div>
+          <Link href="/sessions" className="text-xs text-primary hover:underline">
+            View all sessions
+          </Link>
+        </div>
+
+        {isLoading && rows.length === 0 ? (
+          <div className="py-4 text-center text-xs text-muted-foreground">Loading…</div>
+        ) : rows.length === 0 && (unidentified?.call_count ?? 0) === 0 ? (
+          <div className="py-4 text-sm text-muted-foreground">
+            No client connections in the last hour.
+          </div>
+        ) : (
+          <div className="flex flex-col">
+            {rows.map((s) => {
+              const ins = insight(s, now);
+              const label = clientLabel(s.user_agent);
+              return (
+                <Link
+                  key={s.session_id}
+                  href={`/sessions/${encodeURIComponent(s.session_id)}`}
+                  className="flex items-center gap-3 border-b border-border py-2 text-sm transition-opacity last:border-b-0 hover:opacity-80"
+                >
+                  <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+                    {ins.live && (
+                      <span
+                        className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60"
+                        style={{ background: HEALTH_COLOR[ins.health] }}
+                      />
+                    )}
+                    <span
+                      className="relative inline-flex h-2 w-2 rounded-full"
+                      style={{ background: HEALTH_COLOR[ins.health] }}
+                    />
+                  </span>
+                  <span
+                    className={cnClient(label)}
+                    title={s.user_agent ?? "No User-Agent header sent"}
+                  >
+                    {label}
+                  </span>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {s.virtual_key ? maskKey(s.virtual_key) : "anonymous"}
+                  </span>
+                  <span className="min-w-0 truncate text-xs text-muted-foreground">
+                    {s.models.join(" · ")}
+                  </span>
+                  <span className="ml-auto shrink-0 whitespace-nowrap text-xs text-muted-foreground">
+                    {ins.live ? formatRelative(s.last_ts, now) : `quiet ${quietMinutes(s.last_ts)}m`}
+                  </span>
+                </Link>
+              );
+            })}
+            {!!unidentified && unidentified.call_count > 0 && (
+              <Link
+                href="/logs"
+                className="flex items-center gap-3 py-2 text-sm transition-opacity hover:opacity-80"
+                style={{ color: "var(--warning)" }}
+                title={unidentified.user_agent ?? "No User-Agent header sent"}
+              >
+                <AlertTriangle size={12} className="shrink-0" aria-hidden />
+                <span className="font-medium">Unidentified traffic</span>
+                <span className="text-xs opacity-80">
+                  {unidentified.call_count.toLocaleString()} call
+                  {unidentified.call_count === 1 ? "" : "s"} without a session id
+                  {" · "}
+                  {clientLabel(unidentified.user_agent)}
+                  {unidentified.error_count > 0 &&
+                    ` · ${unidentified.error_count.toLocaleString()} errored`}
+                </span>
+                {unidentified.last_ts != null && (
+                  <span className="ml-auto shrink-0 whitespace-nowrap text-xs opacity-80">
+                    {formatRelative(unidentified.last_ts, now)}
+                  </span>
+                )}
+              </Link>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Muted styling for unrecognized clients so they stand out from known ones. */
+function cnClient(label: string): string {
+  return label === UNKNOWN_CLIENT
+    ? "shrink-0 font-medium italic text-muted-foreground"
+    : "shrink-0 font-medium";
 }
 
 export default function DashboardPage() {
@@ -409,6 +557,11 @@ export default function DashboardPage() {
           format={(v) => `$${v.toFixed(4)}`}
           note={`${(stats?.total_tokens ?? 0).toLocaleString()} tokens`}
         />
+      </div>
+
+      {/* Who's connected right now */}
+      <div data-reveal>
+        <ConnectedClients />
       </div>
 
       {/* Getting started — onboarding only, disappears once traffic exists */}

@@ -8,6 +8,26 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Connected clients on the dashboard + User-Agent capture.** The gateway now records each
+  request's `User-Agent` (sanitized, length-capped — an opaque diagnostic label, never request
+  content, and never forwarded upstream) into a new `user_agent` log column (SQLite + Postgres,
+  idempotent migrations), threaded through the request context including the streaming
+  deferred-capture path. `GET /api/sessions` gains two additive fields: each session's most
+  recently seen `user_agent` ("what is connecting"), and a top-level `unidentified` bucket
+  aggregating calls that sent no session id (count, last timestamp, error count, latest user
+  agent) — so traffic from unrecognized clients can't hide. The dashboard gains a **Connected
+  clients** card: sessions seen in the last hour with a friendly client label (Claude Code,
+  openai-python, curl, …; unknown agents rendered conspicuously), masked virtual key, models,
+  a live-pulse / went-quiet signal per row, and a warning row for unidentified traffic. The
+  Sessions list shows a client chip per session and the journey header names the raw agent.
+
+- **Local-time date rendering, consolidated.** All timestamps ship as unix epoch milliseconds
+  and render in the viewer's local zone via one shared `formatDateTime` helper (logs table,
+  log detail, cache page, dashboard activity), replacing three hand-rolled copies. Chart axis
+  ticks add the year when a range spans one, the logs page reuses the shared `sinceMsForRange`,
+  and relative times on the session journey page now tick via a shared `useNow` hook instead
+  of freezing at render.
+
 - **Session journeys.** Requests can now be grouped into a **session** — the full arc of one
   agent's AI usage (e.g. a Claude Code CLI run), instead of scattered log rows. The gateway
   resolves a session id at ingress: the `x-session-id` header wins, else it derives one from the

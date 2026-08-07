@@ -23,7 +23,7 @@ use crate::{
     filter_where, histogram_from_values, sort_sessions, FilterBind, FilterData, Histogram,
     HistogramMetric, LogFilter, LogPage, LogQuery, LogStats, LogStore, PlaceholderStyle, Rank,
     RankDimension, RankMetric, RequestLog, SessionPage, SessionSort, SessionSummary, SortBy,
-    StoreError, TimePoint,
+    StoreError, TimePoint, UnidentifiedTraffic,
 };
 
 /// Replay a [`FilterBind`] list onto a `sqlx` query builder in order (see the SQLite twin).
@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
     created_at        BIGINT  NOT NULL DEFAULT 0,
     virtual_key       TEXT,
     session_id        TEXT,
+    user_agent        TEXT,
     provider          TEXT    NOT NULL,
     model             TEXT    NOT NULL,
     status            INT     NOT NULL,
@@ -85,6 +86,7 @@ const MIGRATE_COLUMNS: &[&str] = &[
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS redaction_mapping TEXT",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS spans TEXT",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS session_id TEXT",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS user_agent TEXT",
 ];
 
 /// Secondary indexes backing the pushed-down filter/sort/aggregate queries (mirrors the
@@ -139,6 +141,7 @@ struct RequestLogRow {
     created_at: i64,
     virtual_key: Option<String>,
     session_id: Option<String>,
+    user_agent: Option<String>,
     provider: String,
     model: String,
     status: i32,
@@ -166,6 +169,7 @@ impl From<RequestLogRow> for RequestLog {
             created_at: r.created_at,
             virtual_key: r.virtual_key,
             session_id: r.session_id,
+            user_agent: r.user_agent,
             provider: r.provider,
             model: r.model,
             // Values were written from u16/u32/u64 originals, so these casts are
@@ -192,29 +196,29 @@ impl From<RequestLogRow> for RequestLog {
 /// Column list for the lean list/`recent` query. Body columns are selected as typed NULL
 /// literals so large captured payloads are never read on the hot list path.
 const LIST_COLUMNS: &str =
-    "request_id, created_at, virtual_key, session_id, provider, model, status, \
+    "request_id, created_at, virtual_key, session_id, user_agent, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, CAST(NULL AS TEXT) AS request_body, CAST(NULL AS TEXT) AS response_body, \
      CAST(NULL AS TEXT) AS spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Detail column list: captured bodies + `redacted`, but the encrypted mapping is NULLed
 /// (loaded only by the reveal query, not ordinary detail reads).
-const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, provider, model, status, \
+const DETAIL_COLUMNS: &str = "request_id, created_at, virtual_key, session_id, user_agent, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, request_body, response_body, spans, redacted, CAST(NULL AS TEXT) AS redaction_mapping";
 
 /// Reveal column list: everything including the encrypted mapping. Used ONLY by
 /// `get_with_mapping` behind the `logs:reveal` gate.
 const REVEAL_COLUMNS: &str =
-    "request_id, created_at, virtual_key, session_id, provider, model, status, \
+    "request_id, created_at, virtual_key, session_id, user_agent, provider, model, status, \
      prompt_tokens, completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, \
      error_message, request_body, response_body, spans, redacted, redaction_mapping";
 
 const INSERT_SQL: &str = "INSERT INTO request_logs \
      (request_id, created_at, virtual_key, provider, model, status, prompt_tokens, \
       completion_tokens, latency_ms, cost, stream, cache_hit, stop_reason, error_message, \
-      request_body, response_body, spans, redacted, redaction_mapping, session_id) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
+      request_body, response_body, spans, redacted, redaction_mapping, session_id, user_agent) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)";
 
 /// Build the bound INSERT for one log. Shared by `append` (single) and `append_batch`
 /// (transaction). Bound values are owned, so the query is `'static` and can execute
@@ -243,6 +247,7 @@ fn insert_query(
         .bind(log.redacted)
         .bind(log.redaction_mapping)
         .bind(log.session_id)
+        .bind(log.user_agent)
 }
 
 /// Row for the aggregate `stats` query. COUNT/SUM(int)→BIGINT (i64); AVG/SUM(cost) are cast
@@ -296,7 +301,16 @@ struct SessionDetailRow {
     provider: String,
     model: String,
     virtual_key: Option<String>,
+    user_agent: Option<String>,
     created_at: i64,
+}
+
+/// Row for the session-less traffic aggregate (the `unidentified` bucket).
+#[derive(FromRow)]
+struct UnidentifiedRow {
+    call_count: i64,
+    last_ts: Option<i64>,
+    error_count: i64,
 }
 
 #[async_trait]
@@ -576,6 +590,7 @@ impl LogStore for PostgresLogStore {
                 providers: Vec::new(),
                 models: Vec::new(),
                 virtual_key: None,
+                user_agent: None,
             })
             .collect();
         sort_sessions(&mut sessions, sort);
@@ -589,7 +604,7 @@ impl LogStore for PostgresLogStore {
                 .collect::<Vec<_>>()
                 .join(", ");
             let detail_sql = format!(
-                "SELECT session_id, provider, model, virtual_key, created_at \
+                "SELECT session_id, provider, model, virtual_key, user_agent, created_at \
                  FROM request_logs WHERE 1=1{frag} AND session_id IN ({placeholders}) \
                  ORDER BY created_at ASC"
             );
@@ -605,6 +620,8 @@ impl LogStore for PostgresLogStore {
                 models: BTreeSet<String>,
                 vk: Option<String>,
                 vk_at: i64,
+                ua: Option<String>,
+                ua_at: i64,
             }
             let mut map: HashMap<String, Extra> = HashMap::new();
             for r in rows {
@@ -613,6 +630,8 @@ impl LogStore for PostgresLogStore {
                     models: BTreeSet::new(),
                     vk: None,
                     vk_at: i64::MIN,
+                    ua: None,
+                    ua_at: i64::MIN,
                 });
                 e.providers.insert(r.provider);
                 e.models.insert(r.model);
@@ -620,19 +639,55 @@ impl LogStore for PostgresLogStore {
                     e.vk_at = r.created_at;
                     e.vk = r.virtual_key;
                 }
+                // Most recent row with a User-Agent wins it; a header-less call never
+                // erases a known agent, matching `compute_sessions`.
+                if r.user_agent.is_some() && r.created_at >= e.ua_at {
+                    e.ua_at = r.created_at;
+                    e.ua = r.user_agent;
+                }
             }
             for s in &mut page {
                 if let Some(e) = map.remove(&s.session_id) {
                     s.providers = e.providers.into_iter().collect();
                     s.models = e.models.into_iter().collect();
                     s.virtual_key = e.vk;
+                    s.user_agent = e.ua;
                 }
             }
+        }
+
+        // Session-less traffic in the same filter window — the `unidentified` bucket.
+        let unid_sql = format!(
+            "SELECT COUNT(*) AS call_count, MAX(created_at) AS last_ts, \
+             COUNT(*) FILTER (WHERE status < 200 OR status >= 300) AS error_count \
+             FROM request_logs WHERE 1=1{frag} AND session_id IS NULL"
+        );
+        let unid = bind_filter!(sqlx::query_as::<_, UnidentifiedRow>(&unid_sql), &binds)
+            .fetch_one(&self.pool)
+            .await?;
+        let mut unidentified = UnidentifiedTraffic {
+            call_count: unid.call_count as u64,
+            last_ts: unid.last_ts,
+            error_count: unid.error_count as u64,
+            user_agent: None,
+        };
+        if unidentified.call_count > 0 {
+            let ua_sql = format!(
+                "SELECT user_agent FROM request_logs \
+                 WHERE 1=1{frag} AND session_id IS NULL AND user_agent IS NOT NULL \
+                 ORDER BY created_at DESC LIMIT 1"
+            );
+            unidentified.user_agent =
+                bind_filter!(sqlx::query_scalar::<_, Option<String>>(&ua_sql), &binds)
+                    .fetch_optional(&self.pool)
+                    .await?
+                    .flatten();
         }
 
         Ok(SessionPage {
             sessions: page,
             total,
+            unidentified,
         })
     }
 }
@@ -647,6 +702,7 @@ mod tests {
             created_at: 1_700_000_000_000,
             virtual_key: Some("vk-test".to_string()),
             session_id: None,
+            user_agent: Some("test-agent/1.0".to_string()),
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
             status: 200,
@@ -711,6 +767,7 @@ mod tests {
 
         // All fields round-trip, including the wide u64 latency.
         let newest = &got[0];
+        assert_eq!(newest.user_agent.as_deref(), Some("test-agent/1.0"));
         assert_eq!(newest.provider, "openai");
         assert_eq!(newest.model, "gpt-4o");
         assert_eq!(newest.status, 200u16);
@@ -719,6 +776,66 @@ mod tests {
         assert_eq!(newest.latency_ms, big_latency);
 
         assert_eq!(got[1].latency_ms, 42u64);
+    }
+
+    /// Sessions push-down parity for the UA fold + unidentified bucket (mirrors the
+    /// SQLite `sessions_aggregate_in_sql` assertions). Gated like the round-trip test.
+    /// Rows are scoped to this run with a unique virtual key so a shared table can't
+    /// pollute the aggregate.
+    #[tokio::test]
+    async fn sessions_fold_user_agent_and_unidentified_bucket() {
+        let Ok(url) = std::env::var("KGATEWAY_TEST_PG") else {
+            eprintln!("KGATEWAY_TEST_PG unset; skipping Postgres sessions test");
+            return;
+        };
+
+        let store = PostgresLogStore::connect(&url).await.expect("connect");
+        let run = format!("pg-sess-{}", uuid_like());
+        let vk = format!("vk-{run}");
+        let sid = format!("s-{run}");
+        let row =
+            |id: &str, ts: i64, session: Option<&str>, ua: Option<&str>, status: u16| RequestLog {
+                request_id: format!("{run}-{id}"),
+                created_at: ts,
+                virtual_key: Some(vk.clone()),
+                session_id: session.map(str::to_string),
+                user_agent: ua.map(str::to_string),
+                status,
+                ..sample(id, 1)
+            };
+        store
+            .append_batch(vec![
+                row("a1", 10, Some(&sid), Some("curl/8.0"), 200),
+                row("a2", 20, Some(&sid), Some("claude-cli/1.0"), 200),
+                // Latest call has no UA — the known agent must survive.
+                row("a3", 30, Some(&sid), None, 200),
+                row("n1", 40, None, Some("python-requests/2.31"), 200),
+                row("n2", 50, None, None, 500),
+            ])
+            .await
+            .expect("seed");
+
+        let filter = LogFilter {
+            virtual_key: Some(vk.clone()),
+            ..Default::default()
+        };
+        let page = store
+            .sessions(&filter, SessionSort::LastActivity, 50, 0)
+            .await
+            .expect("sessions");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.sessions[0].session_id, sid);
+        assert_eq!(
+            page.sessions[0].user_agent.as_deref(),
+            Some("claude-cli/1.0"),
+            "latest row WITH a UA wins; a header-less call doesn't erase it"
+        );
+
+        let u = &page.unidentified;
+        assert_eq!(u.call_count, 2);
+        assert_eq!(u.last_ts, Some(50));
+        assert_eq!(u.error_count, 1);
+        assert_eq!(u.user_agent.as_deref(), Some("python-requests/2.31"));
     }
 
     /// Cheap unique-ish suffix so concurrent/repeated runs don't collide. Avoids

@@ -25,6 +25,7 @@ import { TraceWaterfall } from "@/components/trace-waterfall";
 import { ChartCard, SegmentedControl } from "@/components/charts";
 import { statusColor } from "@/lib/status";
 import { formatCost, formatCompact, formatDuration, formatClock, formatRelative } from "@/lib/format";
+import { useNow } from "@/lib/use-now";
 import { insight } from "@/lib/session-insights";
 
 const isError = (status: number) => status < 200 || status >= 300;
@@ -148,6 +149,11 @@ function Header({ summary, calls, now }: { summary: SessionSummary; calls: Reque
           {summary.virtual_key && (
             <>
               {" · "}key <code className="font-mono">{summary.virtual_key}</code>
+            </>
+          )}
+          {summary.user_agent && (
+            <>
+              {" · "}client <code className="font-mono">{summary.user_agent}</code>
             </>
           )}
         </span>
@@ -377,7 +383,7 @@ export default function SessionJourneyPage({ params }: { params: Promise<{ id: s
   const calls = useMemo(() => data?.calls ?? [], [data]);
   const flow = useMemo(() => buildFlow(calls, weight), [calls, weight]);
   const fmtValue = useCallback((v: number) => (weight === "cost" ? formatCost(v) : v.toLocaleString()), [weight]);
-  const now = Date.now();
+  const now = useNow(30000);
 
   if (isLoading) return <Skeleton className="h-96 w-full rounded-xl" />;
 

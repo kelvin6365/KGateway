@@ -1,6 +1,4 @@
 // Shared time-range helpers for the dashboard and analytics views.
-// The Logs page still keeps a local copy of its 15m/1h/24h/all subset
-// (see app/logs/page.tsx) — TODO: absorb it here in a later pass.
 
 export type TimeRange = "15m" | "1h" | "24h" | "7d" | "all";
 

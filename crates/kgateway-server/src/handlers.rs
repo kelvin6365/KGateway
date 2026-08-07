@@ -63,11 +63,30 @@ pub(crate) fn session_id_from(headers: &HeaderMap, body_user: Option<&str>) -> O
 /// Trim, strip control characters, and length-cap a candidate session id. `None` if empty
 /// after cleaning.
 pub(crate) fn sanitize_session_id(raw: &str) -> Option<String> {
+    sanitize_header_label(raw, MAX_SESSION_ID_LEN)
+}
+
+/// Max stored User-Agent length. A diagnostic label only ("what is connecting" in the
+/// dashboard); cap it so a hostile client can't bloat a log row (mirrors
+/// `MAX_SESSION_ID_LEN`).
+const MAX_USER_AGENT_LEN: usize = 256;
+
+/// The client's `User-Agent`, sanitized for storage. Captured purely as an audit label —
+/// what kind of client is connecting (a CLI, an SDK, a browser) — and never forwarded
+/// upstream. `None` when the header is missing, unreadable, or empty after cleaning.
+pub(crate) fn user_agent_from(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::USER_AGENT)?.to_str().ok()?;
+    sanitize_header_label(raw, MAX_USER_AGENT_LEN)
+}
+
+/// Trim, strip control characters, and length-cap an opaque header-derived label (session
+/// id, User-Agent). `None` if empty after cleaning.
+fn sanitize_header_label(raw: &str, max: usize) -> Option<String> {
     let cleaned: String = raw
         .trim()
         .chars()
         .filter(|c| !c.is_control())
-        .take(MAX_SESSION_ID_LEN)
+        .take(max)
         .collect();
     let cleaned = cleaned.trim().to_string();
     (!cleaned.is_empty()).then_some(cleaned)
@@ -574,6 +593,7 @@ pub async fn embeddings(
     ctx.virtual_key = vkey_from_headers(&headers);
     // Header-only session grouping for non-chat capabilities (no body user hint).
     ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().embed(&ctx, req).await {
         Ok(resp) => {
@@ -610,6 +630,7 @@ pub async fn chat_completions(
     // Group this call into its session: the `x-session-id` header wins, else the OpenAI
     // `user` field (which Claude Code and other clients set to a per-session identifier).
     ctx.session_id = session_id_from(&headers, req.user.as_deref());
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
 
     if req.stream.unwrap_or(false) {
@@ -1144,6 +1165,7 @@ pub async fn images_generations(
     ctx.virtual_key = vkey_from_headers(&headers);
     // Header-only session grouping for non-chat capabilities (no body user hint).
     ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().image_generate(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "data": resp.data })).into_response(),
@@ -1161,6 +1183,7 @@ pub async fn audio_speech(
     ctx.virtual_key = vkey_from_headers(&headers);
     // Header-only session grouping for non-chat capabilities (no body user hint).
     ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().speech(&ctx, req).await {
         Ok(resp) => (
@@ -1206,6 +1229,7 @@ pub async fn audio_transcriptions(
     ctx.virtual_key = vkey_from_headers(&headers);
     // Header-only session grouping for non-chat capabilities (no body user hint).
     ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     let req = TranscriptionRequest {
         model,
@@ -1228,6 +1252,7 @@ pub async fn rerank(
     ctx.virtual_key = vkey_from_headers(&headers);
     // Header-only session grouping for non-chat capabilities (no body user hint).
     ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().rerank(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "results": resp.results })).into_response(),
@@ -1371,6 +1396,26 @@ mod session_id_tests {
             sanitize_session_id(&long).unwrap().len(),
             MAX_SESSION_ID_LEN
         );
+    }
+
+    #[test]
+    fn user_agent_captured_sanitized_and_capped() {
+        // Normal SDK/CLI agents come through verbatim.
+        let h = headers(&[("user-agent", "claude-cli/1.0 (external, cli)")]);
+        assert_eq!(
+            user_agent_from(&h),
+            Some("claude-cli/1.0 (external, cli)".into())
+        );
+        // Trimmed + control characters stripped.
+        let h = headers(&[("user-agent", "  curl/8.0\t ")]);
+        assert_eq!(user_agent_from(&h), Some("curl/8.0".into()));
+        // Missing or blank header → None.
+        assert_eq!(user_agent_from(&headers(&[])), None);
+        assert_eq!(user_agent_from(&headers(&[("user-agent", "   ")])), None);
+        // A hostile oversized value is capped, not stored whole.
+        let long = "a".repeat(1000);
+        let h = headers(&[("user-agent", long.as_str())]);
+        assert_eq!(user_agent_from(&h).unwrap().len(), MAX_USER_AGENT_LEN);
     }
 }
 
@@ -1614,6 +1659,7 @@ mod logs_tests {
             created_at: 0,
             virtual_key: None,
             session_id: None,
+            user_agent: None,
             provider: provider.to_string(),
             model: "gpt-4".to_string(),
             status,

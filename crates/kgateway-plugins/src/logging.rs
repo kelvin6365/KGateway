@@ -82,6 +82,7 @@ impl LoggingPlugin {
             created_at,
             virtual_key: ctx.virtual_key.clone(),
             session_id: ctx.session_id.clone(),
+            user_agent: ctx.user_agent.clone(),
             provider: record.provider.clone(),
             model: record.model.clone(),
             status: record.status,
@@ -253,7 +254,9 @@ mod tests {
     async fn appends_a_log_for_a_successful_call() {
         let store = Arc::new(MemoryLogStore::default());
         let logger = LoggingPlugin::new(store.clone());
-        let ctx = Ctx::new();
+        let mut ctx = Ctx::new();
+        ctx.session_id = Some("sess-1".into());
+        ctx.user_agent = Some("claude-cli/1.0".into());
 
         logger.on_response(&ctx, &record(200)).await;
 
@@ -266,6 +269,9 @@ mod tests {
         assert_eq!(log.prompt_tokens, 11);
         assert_eq!(log.completion_tokens, 7);
         assert_eq!(log.request_id, ctx.request_id.to_string());
+        // The ingress identity labels land on the stored row.
+        assert_eq!(log.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(log.user_agent.as_deref(), Some("claude-cli/1.0"));
         // M10: cost is estimated from the static table and created_at is populated.
         assert!(log.cost.is_some());
         assert!(log.created_at > 0);

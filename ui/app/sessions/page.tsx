@@ -34,6 +34,8 @@ import { EmptyState } from "@/components/baroque/empty-state";
 import { useCountUp } from "@/components/baroque/use-count-up";
 import { useStaggerReveal } from "@/components/baroque/use-reveal";
 import { formatCost, formatCompact, formatDuration, formatRelative } from "@/lib/format";
+import { useNow } from "@/lib/use-now";
+import { clientLabel } from "@/lib/client-names";
 import {
   insight,
   overview,
@@ -57,16 +59,6 @@ const HEALTH_COLOR: Record<SessionHealth, string> = {
   busy: "var(--warning)",
   idle: "var(--muted-foreground)",
 };
-
-/** Now, sampled once per render tick from the polling query so relative times stay fresh. */
-function useNow(intervalMs = 30000): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(t);
-  }, [intervalMs]);
-  return now;
-}
 
 // ---- KPI band ----------------------------------------------------------------
 
@@ -230,6 +222,7 @@ function SessionCard({
             <span className="text-[11px] text-muted-foreground">+{s.models.length - 1}</span>
           )}
           <Chip>{s.virtual_key ?? "anonymous"}</Chip>
+          {s.user_agent && <Chip title={s.user_agent}>{clientLabel(s.user_agent)}</Chip>}
           {ins.live && (
             <Chip tone="var(--success)" title="A call landed in the last 5 minutes">
               active

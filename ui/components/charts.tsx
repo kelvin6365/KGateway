@@ -11,12 +11,16 @@ import type { Rank, RankMetric, TimePoint } from "@/lib/api";
 export const ERROR_COLOR = "var(--error)";
 
 export function formatAxisTime(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+  const d = new Date(ms);
+  const opts: Intl.DateTimeFormatOptions = {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  });
+  };
+  // The "all" range can span years; disambiguate ticks outside the current year.
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleString(undefined, opts);
 }
 
 export function formatCostValue(v: number): string {

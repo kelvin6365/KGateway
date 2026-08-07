@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/table";
 import { OrnamentDivider } from "@/components/baroque/ornament-divider";
 import { EmptyState } from "@/components/baroque/empty-state";
+import { formatDateTime } from "@/lib/format";
 
 function StatTile({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
@@ -47,10 +48,6 @@ function ConfigTile({ label, value }: { label: string; value: string }) {
       </CardContent>
     </Card>
   );
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleString();
 }
 
 export default function CachePage() {
@@ -205,7 +202,7 @@ export default function CachePage() {
                     {(cacheLogs?.logs ?? []).map((l) => (
                       <TableRow key={l.request_id}>
                         <TableCell className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                          {formatTime(l.created_at)}
+                          {formatDateTime(l.created_at)}
                         </TableCell>
                         <TableCell className="px-4 py-3 font-medium">{l.model}</TableCell>
                         <TableCell className="px-4 py-3 text-muted-foreground">
