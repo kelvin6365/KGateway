@@ -9,12 +9,10 @@ import {
   getLog,
   getLogStats,
   getDroppedCount,
-  getWhoami,
   revealLog,
   logStreamUrl,
-  getAdminToken,
-  setAdminToken,
   getFilterData,
+  AuthRequiredError,
   type RequestLog,
   type LogQueryParams,
   type LogStatsFilters,
@@ -22,6 +20,8 @@ import {
   type SortOrder,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth-context";
+import { TokenGate } from "@/components/token-gate";
 import { statusColor } from "@/lib/status";
 import { formatDateTime } from "@/lib/format";
 import { sinceMsForRange } from "@/lib/time";
@@ -274,20 +274,9 @@ function SortableHeader({ label, column, sortBy, order, disabled, onSort }: Sort
 }
 
 function LogsPageContent() {
-  // --- admin token ---
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [tokenVersion, setTokenVersion] = useState(0); // bump to re-read localStorage
-  const [hasToken, setHasToken] = useState(false);
-  useEffect(() => {
-    setHasToken(!!getAdminToken());
-  }, [tokenVersion]);
-
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    setTokenVersion((v) => v + 1);
-  }
+  // --- identity (token, scoping, reveal permission) ---
+  const { token, hasToken, isScoped, can } = useAuth();
+  const canReveal = can("logs:reveal");
 
   // --- view ---
   const [view, setView] = useState<View>("logs");
@@ -331,7 +320,6 @@ function LogsPageContent() {
 
   useEffect(() => {
     if (!live) return;
-    const token = getAdminToken();
     if (!token) {
       setLive(false);
       return;
@@ -350,7 +338,7 @@ function LogsPageContent() {
       // EventSource retries automatically; nothing to do here.
     };
     return () => es.close();
-  }, [live]);
+  }, [live, token]);
 
   const statusNum = debouncedStatus.trim() ? Number(debouncedStatus.trim()) : undefined;
   const statusValid = statusNum === undefined || Number.isFinite(statusNum);
@@ -488,15 +476,6 @@ function LogsPageContent() {
     refetchInterval: 10000,
   });
 
-  // Current caller's role/permissions — determines whether the reveal action is offered.
-  const { data: whoami } = useQuery({
-    queryKey: ["whoami"],
-    queryFn: () => getWhoami(),
-    enabled: hasToken,
-    retry: false,
-  });
-  const canReveal = !!whoami?.permissions.includes("logs:reveal");
-
   // Reveal flow for redacted content — kept only in component state, never persisted or
   // logged. Reset whenever the drawer closes or a different row is opened so secrets never
   // leak across rows.
@@ -532,11 +511,11 @@ function LogsPageContent() {
     setRevealError(null);
   }
 
-  const authError =
-    (logsErrorObj as Error | undefined)?.message === "admin token required";
+  const authError = logsErrorObj instanceof AuthRequiredError;
 
   return (
     <div className="flex flex-col gap-6">
+      <TokenGate>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-wide">Logs</h1>
@@ -558,15 +537,6 @@ function LogsPageContent() {
               </TooltipContent>
             </Tooltip>
           )}
-          <button
-            onClick={() => {
-              setAdminTok(getAdminToken());
-              setShowAdmin((s) => !s);
-            }}
-            className="text-xs text-muted-foreground underline"
-          >
-            {hasToken ? "admin token set" : "set admin token"}
-          </button>
         </div>
       </div>
 
@@ -579,26 +549,6 @@ function LogsPageContent() {
           ))}
         </TabsList>
       </Tabs>
-
-      {showAdmin && (
-        <Card>
-          <CardContent className="flex flex-col gap-2">
-            <Label className="text-xs font-medium">
-              Admin token (required for GET /api/logs*, only needed if the gateway has{" "}
-              <code>admin_token</code> set)
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                value={adminTok}
-                onChange={(e) => setAdminTok(e.target.value)}
-                placeholder="Bearer token for /api/*"
-              />
-              <Button onClick={saveAdmin}>Save</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Stats bar */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
@@ -666,23 +616,27 @@ function LogsPageContent() {
                 ))}
               </datalist>
             </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-xs font-medium">Virtual key</Label>
-              <Input
-                value={virtualKey}
-                onChange={(e) => {
-                  setVirtualKey(e.target.value);
-                  setOffset(0);
-                }}
-                placeholder="vk_team_alpha"
-                list="vkey-options"
-              />
-              <datalist id="vkey-options">
-                {(filterData?.virtual_keys ?? []).map((k) => (
-                  <option key={k} value={k} />
-                ))}
-              </datalist>
-            </div>
+            {/* Scoped (virtual-key) callers only ever see their own traffic — the server
+                forces the filter, so offering it here would be a dead control. */}
+            {!isScoped && (
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs font-medium">Virtual key</Label>
+                <Input
+                  value={virtualKey}
+                  onChange={(e) => {
+                    setVirtualKey(e.target.value);
+                    setOffset(0);
+                  }}
+                  placeholder="vk_team_alpha"
+                  list="vkey-options"
+                />
+                <datalist id="vkey-options">
+                  {(filterData?.virtual_keys ?? []).map((k) => (
+                    <option key={k} value={k} />
+                  ))}
+                </datalist>
+              </div>
+            )}
             <div className="flex flex-col gap-1">
               <Label className="text-xs font-medium">Status</Label>
               <Input
@@ -762,7 +716,7 @@ function LogsPageContent() {
             </div>
             {view === "logs" && (
               <label className="flex items-center gap-2 text-sm">
-                <span title={hasToken ? "" : "Set an admin token to enable live tail"}>Live</span>
+                <span title={hasToken ? "" : "Sign in to enable live tail"}>Live</span>
                 <Switch
                   checked={live}
                   onCheckedChange={() => setLive((l) => !l)}
@@ -776,7 +730,7 @@ function LogsPageContent() {
                 )}
                 {!hasToken && (
                   <span className="text-xs text-muted-foreground">
-                    (set an admin token above)
+                    (sign in — see Settings)
                   </span>
                 )}
               </label>
@@ -794,7 +748,7 @@ function LogsPageContent() {
       {view === "logs" && (authError ? (
         <EmptyState
           title="Could not load logs"
-          hint="The gateway requires an admin token — click ‘set admin token’ above."
+          hint="Access token required — see Settings."
         />
       ) : logsError && !live ? (
         <EmptyState
@@ -1117,6 +1071,7 @@ function LogsPageContent() {
           )}
         </DialogContent>
       </Dialog>
+      </TokenGate>
     </div>
   );
 }

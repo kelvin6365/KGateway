@@ -1,11 +1,13 @@
 //! HTTP handlers. M1: health + chat completions (JSON and SSE streaming).
 
 use crate::app::SharedState;
+use crate::auth::Caller;
 use crate::config::{ProviderConfig, VirtualKeyInput};
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use axum::Json;
 use futures::StreamExt;
 use kgateway_core::context::Ctx;
@@ -172,9 +174,24 @@ impl LogsParams {
     }
 }
 
+/// Force-override the `virtual_key` filter for a scoped (virtual-key) caller. The caller's
+/// own `virtual_key` query param is ignored — a scoped identity is never trusted to pick
+/// its filter. Control tokens and open mode pass the filter through untouched.
+fn scoped(caller: &Caller, mut filter: LogFilter) -> LogFilter {
+    if let Some(id) = caller.scope() {
+        filter.virtual_key = Some(id.to_string());
+    }
+    filter
+}
+
 /// `GET /api/logs` — filtered, sorted, paginated request logs (control-plane).
-pub async fn logs(State(state): State<SharedState>, Query(params): Query<LogsParams>) -> Response {
-    let query = params.to_query();
+pub async fn logs(
+    State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
+    Query(params): Query<LogsParams>,
+) -> Response {
+    let mut query = params.to_query();
+    query.filter = scoped(&caller, query.filter);
     match state.log_store.query(&query).await {
         Ok(page) => Json(page).into_response(),
         Err(e) => store_error_response(e),
@@ -184,9 +201,10 @@ pub async fn logs(State(state): State<SharedState>, Query(params): Query<LogsPar
 /// `GET /api/logs/stats` — aggregate stats over the same filter params as `/api/logs`.
 pub async fn logs_stats(
     State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
     Query(params): Query<LogsParams>,
 ) -> Response {
-    let filter = params.to_filter();
+    let filter = scoped(&caller, params.to_filter());
     match state.log_store.stats(&filter).await {
         Ok(stats) => Json(stats).into_response(),
         Err(e) => store_error_response(e),
@@ -217,9 +235,10 @@ fn filter_from_map(q: &HashMap<String, String>) -> LogFilter {
 /// `GET /api/logs/histogram?metric=latency|cost|tokens&buckets=N&<filters>` (M12).
 pub async fn logs_histogram(
     State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = filter_from_map(&q);
+    let filter = scoped(&caller, filter_from_map(&q));
     let metric = match q.get("metric").map(String::as_str) {
         Some("cost") => HistogramMetric::Cost,
         Some("tokens") => HistogramMetric::Tokens,
@@ -235,9 +254,10 @@ pub async fn logs_histogram(
 /// `GET /api/logs/timeseries?bucket_ms=N&<filters>` (M12). Default bucket: 60s.
 pub async fn logs_timeseries(
     State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = filter_from_map(&q);
+    let filter = scoped(&caller, filter_from_map(&q));
     let bucket_ms = q
         .get("bucket_ms")
         .and_then(|s| s.parse().ok())
@@ -251,9 +271,10 @@ pub async fn logs_timeseries(
 /// `GET /api/logs/rankings?by=model|provider|virtual_key&metric=count|cost|tokens|errors&limit=N&<filters>` (M12).
 pub async fn logs_rankings(
     State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = filter_from_map(&q);
+    let filter = scoped(&caller, filter_from_map(&q));
     let dimension = match q.get("by").map(String::as_str) {
         Some("provider") => RankDimension::Provider,
         Some("virtual_key") => RankDimension::VirtualKey,
@@ -280,9 +301,16 @@ pub async fn logs_rankings(
     }
 }
 
-/// `GET /api/logs/filterdata` — distinct provider/model/virtual-key values (M12).
-pub async fn logs_filterdata(State(state): State<SharedState>) -> Response {
-    match state.log_store.filter_values().await {
+/// `GET /api/logs/filterdata` — distinct provider/model/virtual-key values (M12). A
+/// scoped caller sees only the values its own traffic produced (including a
+/// `virtual_keys` list that is just itself) — the global key roster is not enumerable
+/// from a single key.
+pub async fn logs_filterdata(
+    State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
+) -> Response {
+    let filter = scoped(&caller, LogFilter::default());
+    match state.log_store.filter_values(&filter).await {
         Ok(fd) => Json(fd).into_response(),
         Err(e) => store_error_response(e),
     }
@@ -296,9 +324,10 @@ const MAX_SESSION_CALLS: usize = 1_000;
 /// per-session usage summaries (the Sessions list). Same filter params as `/api/logs`.
 pub async fn sessions(
     State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let filter = filter_from_map(&q);
+    let filter = scoped(&caller, filter_from_map(&q));
     let sort = match q.get("sort").map(String::as_str) {
         Some("cost") => SessionSort::Cost,
         Some("tokens") => SessionSort::Tokens,
@@ -323,11 +352,21 @@ pub async fn sessions(
 /// `GET /api/sessions/{id}` — one session's journey: its summary plus every call in it,
 /// oldest first (the order the agent made them). 404 if the session id isn't in the
 /// recent window. Powers the dashboard's session timeline + Sankey diagrams.
-pub async fn session_detail(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
-    let filter = LogFilter {
-        session_id: Some(id.clone()),
-        ..Default::default()
-    };
+pub async fn session_detail(
+    State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> Response {
+    // Scoped callers get the session as their own key saw it: a session with none of
+    // their calls falls into the summary-empty 404 below (no existence oracle), and a
+    // mixed-key session shows only their own calls.
+    let filter = scoped(
+        &caller,
+        LogFilter {
+            session_id: Some(id.clone()),
+            ..Default::default()
+        },
+    );
     let summary = match state
         .log_store
         .sessions(&filter, SessionSort::LastActivity, 1, 0)
@@ -372,9 +411,29 @@ pub async fn logs_dropped(State(state): State<SharedState>) -> Response {
     Json(serde_json::json!({ "dropped": dropped })).into_response()
 }
 
-/// `GET /api/logs/{id}` — a single request log by id (control-plane).
-pub async fn log_detail(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+/// `GET /api/logs/{id}` — a single request log by id (control-plane). A scoped caller can
+/// read only its own rows (including their captured bodies — content it authored);
+/// another key's row returns the same 404 as a missing one, so ids are not an existence
+/// oracle. Redacted content stays redacted — reveal is a separate admin-only endpoint.
+pub async fn log_detail(
+    State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+) -> Response {
     match state.log_store.get(&id).await {
+        Ok(Some(log))
+            if caller
+                .scope()
+                .is_some_and(|vk| log.virtual_key.as_deref() != Some(vk)) =>
+        {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": { "message": "log not found", "type": "not_found" }
+                })),
+            )
+                .into_response()
+        }
         Ok(Some(log)) => {
             // `spans` is stored as a JSON string; hand clients a real array rather than
             // JSON-inside-a-string they'd have to double-parse. Unparseable content is
@@ -402,41 +461,63 @@ pub async fn log_detail(State(state): State<SharedState>, Path(id): Path<String>
     }
 }
 
-/// `GET /api/whoami` — the caller's role + permissions, so the UI can show/hide controls
-/// (e.g. the Reveal button). In the `view` group, so any authenticated token can call it.
-pub async fn whoami(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+/// `GET /api/whoami` — the caller's resolved identity, so the UI can show who is signed
+/// in and show/hide controls (e.g. the Reveal button). The auth middleware already
+/// resolved the [`Caller`]; open (dev) mode reports as an admin token for back-compat.
+/// A virtual-key caller reports `kind: "virtual_key"` with the key it is scoped to.
+pub async fn whoami(
+    State(state): State<SharedState>,
+    Extension(caller): Extension<Caller>,
+) -> Response {
     use crate::auth::Permission;
-    // Auth disabled (dev) ⇒ treat the caller as admin.
-    let role = if !state.auth.is_enabled() {
-        crate::config::Role::Admin
-    } else {
-        let presented = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
-            .and_then(|t| state.auth.role_for(t));
-        match presented {
-            Some(r) => r,
-            None => {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": { "message": "authentication required", "type": "auth" }
-                    })),
-                )
-                    .into_response()
-            }
+    let role_permissions = |role: crate::config::Role| {
+        let mut permissions = vec!["logs:view"];
+        if role.permits(Permission::ConfigWrite) {
+            permissions.push("config:write");
         }
+        if role.permits(Permission::LogsReveal) {
+            permissions.push("logs:reveal");
+        }
+        permissions
     };
-    let mut permissions = vec!["logs:view"];
-    if role.permits(Permission::ConfigWrite) {
-        permissions.push("config:write");
+    match caller {
+        Caller::Open => {
+            let role = crate::config::Role::Admin;
+            Json(serde_json::json!({
+                "kind": "open",
+                "role": role,
+                "permissions": role_permissions(role),
+            }))
+            .into_response()
+        }
+        Caller::Token { role, name } => Json(serde_json::json!({
+            "kind": "token",
+            "role": role,
+            "name": name,
+            "permissions": role_permissions(role),
+        }))
+        .into_response(),
+        Caller::VirtualKey { id } => {
+            // The key's display name, if it has one, for a friendlier badge.
+            let name = state
+                .config
+                .load()
+                .virtual_keys
+                .iter()
+                .find(|vk| vk.id == id)
+                .map(|vk| vk.name.clone())
+                .filter(|n| !n.is_empty());
+            Json(serde_json::json!({
+                "kind": "virtual_key",
+                "role": serde_json::Value::Null,
+                "name": name,
+                "scoped": true,
+                "scoped_to": id,
+                "permissions": ["logs:view"],
+            }))
+            .into_response()
+        }
     }
-    if role.permits(Permission::LogsReveal) {
-        permissions.push("logs:reveal");
-    }
-    Json(serde_json::json!({ "role": role, "permissions": permissions })).into_response()
 }
 
 /// `GET /api/logs/{id}/reveal` — un-redact a log's captured bodies (M11). Gated by
@@ -541,33 +622,42 @@ fn reveal_body(
 ///
 /// Browser `EventSource` can't set an `Authorization` header, so this endpoint
 /// self-authenticates from the `token` query param (rather than the header-only RBAC
-/// layer). Requires `logs:view`. When auth is disabled, it's open. The broadcast never
-/// carries captured bodies, so no redaction concern here.
+/// layer). Accepts the same identities as the scoped-read group: a control token (any
+/// role) tails everything; a virtual key tails only its own rows. When fully open (no
+/// tokens, no keys), it's open. The broadcast never carries captured bodies, so no
+/// redaction concern here.
 pub async fn logs_stream(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if state.auth.is_enabled() {
-        let permitted = params
-            .get("token")
-            .and_then(|t| state.auth.role_for(t))
-            .is_some_and(|role| role.permits(crate::auth::Permission::LogsView));
-        if !permitted {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": { "message": "authentication required", "type": "auth" }
-                })),
-            )
-                .into_response();
-        }
-    }
+    let config = state.config.load();
+    let caller = state.auth.resolve_caller(
+        crate::auth::read_enforced(&state.auth, &config),
+        config.virtual_keys.iter().map(|vk| vk.id.as_str()),
+        params.get("token").map(String::as_str),
+    );
+    let Some(caller) = caller else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": { "message": "authentication required", "type": "auth" }
+            })),
+        )
+            .into_response();
+    };
+    let scope = caller.scope().map(str::to_string);
 
     let mut rx = state.log_sinks.broadcast.subscribe();
     let stream = async_stream::stream! {
         loop {
             match rx.recv().await {
                 Ok(log) => {
+                    // A scoped caller's tail only carries its own key's rows.
+                    if let Some(vk) = &scope {
+                        if log.virtual_key.as_deref() != Some(vk.as_str()) {
+                            continue;
+                        }
+                    }
                     let data = serde_json::to_string(&log).unwrap_or_default();
                     yield Ok::<_, Infallible>(Event::default().data(data));
                 }
@@ -1105,10 +1195,48 @@ pub async fn delete_provider(
     }
 }
 
-/// `GET /api/config/virtual-keys` — configured virtual keys (admin-only).
-pub async fn get_config_vkeys(State(state): State<SharedState>) -> Response {
+/// Mask a virtual-key id for display: enough prefix to recognize it, never enough to use
+/// it. Short ids get no prefix at all.
+fn mask_vkey_id(id: &str) -> String {
+    if id.chars().count() > 8 {
+        let prefix: String = id.chars().take(4).collect();
+        format!("{prefix}…")
+    } else {
+        "…".to_string()
+    }
+}
+
+/// `GET /api/config/virtual-keys` — configured virtual keys. The id **is** the bearer
+/// secret, so only callers who could rewrite the keys anyway (`config:write`: operator /
+/// admin, or open mode) receive it; a viewer gets each key with the id masked
+/// (`id_masked: true`) but limits/names intact so the page still renders.
+pub async fn get_config_vkeys(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     let config = state.config.load_full();
-    Json(serde_json::json!({ "virtual_keys": config.virtual_keys })).into_response()
+    let full = if crate::auth::read_enforced(&state.auth, &config) {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim)
+            .and_then(|t| state.auth.role_for(t))
+            .is_some_and(|role| role.permits(crate::auth::Permission::ConfigWrite))
+    } else {
+        true // open (dev) mode
+    };
+    if full {
+        return Json(serde_json::json!({ "virtual_keys": config.virtual_keys })).into_response();
+    }
+    let masked: Vec<serde_json::Value> = config
+        .virtual_keys
+        .iter()
+        .map(|vk| {
+            let mut v = serde_json::to_value(vk).unwrap_or_else(|_| serde_json::json!({}));
+            v["id"] = serde_json::Value::String(mask_vkey_id(&vk.id));
+            v["id_masked"] = serde_json::Value::Bool(true);
+            v
+        })
+        .collect();
+    Json(serde_json::json!({ "virtual_keys": masked })).into_response()
 }
 
 /// `PUT /api/config/virtual-keys/{id}` — create/update a virtual key, persist, hot-reload.
