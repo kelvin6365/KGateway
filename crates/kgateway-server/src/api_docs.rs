@@ -17,6 +17,7 @@ fn groups() -> Vec<&'static str> {
     let order = [
         Auth::DataPlane,
         Auth::Public,
+        Auth::ScopedRead,
         Auth::LogsView,
         Auth::ConfigWrite,
         Auth::LogsReveal,

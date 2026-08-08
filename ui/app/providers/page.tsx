@@ -12,10 +12,11 @@ import {
   getProviders,
   putProvider,
   deleteProvider,
-  getAdminToken,
-  setAdminToken,
+  AuthRequiredError,
   type ProviderConfigInput,
 } from "@/lib/api";
+import { TokenGate } from "@/components/token-gate";
+import { useAuth } from "@/lib/auth-context";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -142,8 +143,10 @@ const CUSTOM_KINDS = [
 
 export default function ProvidersPage() {
   const qc = useQueryClient();
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
+  // Viewer-role tokens can see this page but not mutate config — render their write
+  // affordances disabled instead of letting the server 403 them.
+  const { can } = useAuth();
+  const canWrite = can("config:write");
 
   const { data: providers = [], isLoading, isError, error } = useQuery({
     queryKey: ["providers"],
@@ -192,6 +195,9 @@ export default function ProvidersPage() {
   const remove = useMutation({
     mutationFn: (n: string) => deleteProvider(n),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+    // Row-level action with no form around it — surface the failure (403 for a
+    // viewer-role token, network errors) instead of silently doing nothing.
+    onError: (e: Error) => alert(`Could not remove provider: ${e.message}`),
   });
 
   function submit(e: React.FormEvent) {
@@ -210,14 +216,9 @@ export default function ProvidersPage() {
     upsert.mutate({ name: name.trim().toLowerCase(), config });
   }
 
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    qc.invalidateQueries();
-  }
-
   return (
     <div className="flex flex-col gap-6">
+      <TokenGate need="token">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-wide">Providers</h1>
@@ -226,43 +227,15 @@ export default function ProvidersPage() {
             restart.
           </p>
         </div>
-        <button
-          onClick={() => {
-            setAdminTok(getAdminToken());
-            setShowAdmin((s) => !s);
-          }}
-          className="text-xs text-muted-foreground underline"
-        >
-          {getAdminToken() ? "admin token set" : "set admin token"}
-        </button>
       </div>
-
-      {showAdmin && (
-        <Card>
-          <CardContent className="flex flex-col gap-2">
-            <Label>
-              Admin token (only needed if the gateway has <code>admin_token</code> set)
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                value={adminTok}
-                onChange={(e) => setAdminTok(e.target.value)}
-                placeholder="Bearer token for /api/*"
-              />
-              <Button onClick={saveAdmin}>Save</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Configured providers */}
       {isError ? (
         <EmptyState
           title="Could not load providers"
           hint={
-            (error as Error)?.message === "admin token required"
-              ? "The gateway requires an admin token — click ‘set admin token’ above."
+            error instanceof AuthRequiredError
+              ? "Access token required — see Settings."
               : "The gateway did not respond to GET /api/providers."
           }
         />
@@ -285,8 +258,13 @@ export default function ProvidersPage() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      disabled={!canWrite}
                       onClick={() => openForConfigured(p.name)}
-                      title="Update provider (re-enter key)"
+                      title={
+                        canWrite
+                          ? "Update provider (re-enter key)"
+                          : "Requires an operator or admin token"
+                      }
                     >
                       <Pencil size={14} />
                     </Button>
@@ -294,10 +272,13 @@ export default function ProvidersPage() {
                       variant="ghost"
                       size="icon"
                       className="text-destructive"
+                      disabled={!canWrite}
                       onClick={() => {
                         if (confirm(`Remove provider "${p.name}"?`)) remove.mutate(p.name);
                       }}
-                      title="Remove provider"
+                      title={
+                        canWrite ? "Remove provider" : "Requires an operator or admin token"
+                      }
                     >
                       <Trash2 size={14} />
                     </Button>
@@ -448,6 +429,7 @@ export default function ProvidersPage() {
           )}
         </SheetContent>
       </Sheet>
+      </TokenGate>
     </div>
   );
 }

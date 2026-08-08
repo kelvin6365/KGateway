@@ -548,22 +548,26 @@ impl LogStore for SqliteLogStore {
             .collect())
     }
 
-    async fn filter_values(&self) -> Result<FilterData, StoreError> {
-        let providers: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT provider FROM request_logs WHERE provider IS NOT NULL ORDER BY provider",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let models: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT model FROM request_logs WHERE model IS NOT NULL ORDER BY model",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let virtual_keys: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT virtual_key FROM request_logs WHERE virtual_key IS NOT NULL ORDER BY virtual_key",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn filter_values(&self, filter: &LogFilter) -> Result<FilterData, StoreError> {
+        let (frag, binds, _) = filter_where(filter, PlaceholderStyle::Question, 1);
+        let sql = format!(
+            "SELECT DISTINCT provider FROM request_logs WHERE provider IS NOT NULL{frag} ORDER BY provider"
+        );
+        let providers: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
+        let sql = format!(
+            "SELECT DISTINCT model FROM request_logs WHERE model IS NOT NULL{frag} ORDER BY model"
+        );
+        let models: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
+        let sql = format!(
+            "SELECT DISTINCT virtual_key FROM request_logs WHERE virtual_key IS NOT NULL{frag} ORDER BY virtual_key"
+        );
+        let virtual_keys: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(FilterData {
             providers,
             models,
@@ -1210,22 +1214,48 @@ mod tests {
                 None,
             ),
             mk("r3", 3, "anthropic", "claude", 200, 1, 1, None, false, None),
+            // A second tenant so the scoped query has something to exclude.
+            RequestLog {
+                virtual_key: Some("vk2".to_string()),
+                ..mk("r4", 4, "gemini", "flash", 200, 1, 1, None, false, None)
+            },
         ];
         store.append_batch(batch).await.expect("seed");
 
-        let fv = store.filter_values().await.expect("filter_values");
+        let fv = store
+            .filter_values(&LogFilter::default())
+            .await
+            .expect("filter_values");
         assert_eq!(
             fv.providers,
-            vec!["anthropic".to_string(), "openai".to_string()]
+            vec![
+                "anthropic".to_string(),
+                "gemini".to_string(),
+                "openai".to_string()
+            ]
         );
         assert_eq!(
             fv.models,
             vec![
                 "claude".to_string(),
+                "flash".to_string(),
                 "gpt-4o".to_string(),
                 "gpt-4o-mini".to_string()
             ]
         );
+        assert_eq!(fv.virtual_keys, vec!["vk".to_string(), "vk2".to_string()]);
+
+        // Scoped to one virtual key: value lists shrink to that key's traffic only.
+        let scoped = store
+            .filter_values(&LogFilter {
+                virtual_key: Some("vk2".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("scoped filter_values");
+        assert_eq!(scoped.providers, vec!["gemini".to_string()]);
+        assert_eq!(scoped.models, vec!["flash".to_string()]);
+        assert_eq!(scoped.virtual_keys, vec!["vk2".to_string()]);
     }
 
     #[tokio::test]

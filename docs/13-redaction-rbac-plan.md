@@ -103,7 +103,9 @@ KDF (Argon2id/PBKDF2 + persisted salt) and key rotation is deferred — **operat
 high-entropy `redaction.key`.**
 
 ## Out of scope (later)
-Per-user accounts / SSO, per-team or per-vkey log scoping, key rotation for the redaction key,
+Per-user accounts / SSO, ~~per-team or per-vkey log scoping~~ (shipped later as M27 —
+virtual keys now read the log/session/analytics APIs scoped to their own traffic; see
+[09-security](./09-security.md#access-model--tokens-vs-virtual-keys)), key rotation for the redaction key,
 format-preserving redaction, ML/entropy-based detection, redacting *live* proxied traffic (this
 track redacts only what's captured into logs).
 

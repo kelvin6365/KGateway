@@ -884,9 +884,12 @@ pub trait LogStore: Send + Sync {
         Ok(compute_rankings(&logs, dimension, metric, limit))
     }
 
-    /// Distinct filter values for the UI dropdowns.
-    async fn filter_values(&self) -> Result<FilterData, StoreError> {
-        let logs = self.recent(DEFAULT_SCAN_LIMIT).await?;
+    /// Distinct filter values for the UI dropdowns, computed over the filtered set. Pass a
+    /// default (empty) filter for the global view; a scoped caller passes its own
+    /// `virtual_key` so the value lists (including the key list itself) never span other
+    /// keys' traffic.
+    async fn filter_values(&self, filter: &LogFilter) -> Result<FilterData, StoreError> {
+        let logs = self.scan_filtered(filter).await?;
         Ok(compute_filter_values(&logs))
     }
 
@@ -1153,6 +1156,34 @@ mod tests {
         assert_eq!(fd.providers, vec!["anthropic", "openai"]);
         assert_eq!(fd.models, vec!["claude", "gpt-4o"]);
         assert_eq!(fd.virtual_keys, vec!["vk1"]); // distinct
+    }
+
+    #[tokio::test]
+    async fn filter_values_scopes_to_the_filtered_set() {
+        let store = MemoryLogStore::default();
+        for (id, provider, vk) in [("a", "openai", "vk1"), ("b", "anthropic", "vk2")] {
+            store
+                .append(RequestLog {
+                    provider: provider.into(),
+                    virtual_key: Some(vk.into()),
+                    ..log_at(id, 0)
+                })
+                .await
+                .unwrap();
+        }
+        // Empty filter = previous behavior: everything.
+        let all = store.filter_values(&LogFilter::default()).await.unwrap();
+        assert_eq!(all.virtual_keys, vec!["vk1", "vk2"]);
+        // Scoped to vk1: only vk1's providers and its own key.
+        let scoped = store
+            .filter_values(&LogFilter {
+                virtual_key: Some("vk1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(scoped.providers, vec!["openai"]);
+        assert_eq!(scoped.virtual_keys, vec!["vk1"]);
     }
 
     /// A status-200 log with a session id + chosen provider/model/tokens/cost. Tests that

@@ -19,7 +19,12 @@ pub enum Auth {
     DataPlane,
     /// Open regardless of configuration — liveness and the docs artifacts themselves.
     Public,
-    /// Control-plane read: `logs:view` (viewer role and above).
+    /// Control-plane read that virtual keys may also call: a control token (any role)
+    /// sees all data; a virtual key authenticates but the response is force-scoped to
+    /// rows that key produced.
+    ScopedRead,
+    /// Control-plane read: `logs:view` (viewer role and above). Tokens only — virtual
+    /// keys are rejected here.
     LogsView,
     /// Control-plane write: `config:write` (operator and above).
     ConfigWrite,
@@ -32,6 +37,7 @@ impl Auth {
         match self {
             Auth::DataPlane => "virtual key (strict mode only)",
             Auth::Public => "none",
+            Auth::ScopedRead => "logs:view, or a virtual key (scoped to its own data)",
             Auth::LogsView => "logs:view",
             Auth::ConfigWrite => "config:write",
             Auth::LogsReveal => "logs:reveal",
@@ -42,7 +48,7 @@ impl Auth {
     pub fn group(self) -> &'static str {
         match self {
             Auth::DataPlane | Auth::Public => "Data plane",
-            Auth::LogsView => "Control plane (read)",
+            Auth::ScopedRead | Auth::LogsView => "Control plane (read)",
             Auth::ConfigWrite => "Control plane (write)",
             Auth::LogsReveal => "Redaction",
         }
@@ -399,10 +405,11 @@ index links to. The slug is the method and path lowercased and hyphenated.",
     Endpoint {
         method: "GET",
         path: "/api/logs",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Query the request audit log",
         description: "Filtered, sorted, paginated. Deliberately lean: captured bodies and trace spans \
-are omitted here and fetched per-request from `/api/logs/{id}`.",
+are omitted here and fetched per-request from `/api/logs/{id}`. A virtual-key caller sees only rows \
+its own key produced — the `virtual_key` filter is forced server-side and cannot be widened.",
         params: &[
             Param { name: "limit", location: "query", ty: "integer", required: false, description: "Page size, capped at 200. Default 50." },
             Param { name: "offset", location: "query", ty: "integer", required: false, description: "Rows to skip." },
@@ -422,12 +429,13 @@ are omitted here and fetched per-request from `/api/logs/{id}`.",
     Endpoint {
         method: "GET",
         path: "/api/logs/{id}",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "One request in full, with its trace",
         description: "The only endpoint that returns captured request/response bodies and the per-stage \
 **trace spans** behind the call waterfall — list and live-tail responses omit both. Spans arrive as a \
 JSON array and carry no request content or upstream error text, only stage names, timings, and \
-gateway-authored outcomes.",
+gateway-authored outcomes. A virtual-key caller can fetch only its own rows; another key's id \
+returns the same 404 as a missing one.",
         params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "The request id." }],
         example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/logs/$REQUEST_ID",
         response: r#"{
@@ -440,19 +448,20 @@ gateway-authored outcomes.",
     Endpoint {
         method: "GET",
         path: "/api/logs/stream",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Live-tail the audit log (SSE)",
         description: "Server-sent events, one per completed request. Authenticates via a `?token=` query \
 parameter rather than a header, because browser `EventSource` cannot send one. Payloads follow the \
-lean list contract — no bodies, no spans.",
-        params: &[Param { name: "token", location: "query", ty: "string", required: true, description: "Control-plane token, since EventSource can't set headers." }],
+lean list contract — no bodies, no spans. A virtual key may connect; its tail carries only events \
+from its own traffic.",
+        params: &[Param { name: "token", location: "query", ty: "string", required: true, description: "Control-plane token or virtual key, since EventSource can't set headers." }],
         example: "curl -N \"http://localhost:8080/api/logs/stream?token=$KG_ADMIN\"",
         response: "",
     },
     Endpoint {
         method: "GET",
         path: "/api/logs/stats",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Aggregate stats over a filter",
         description: "Totals, success/error counts, average latency, tokens, cost, cache hits, over \
 whatever the filters select.",
@@ -463,7 +472,7 @@ whatever the filters select.",
     Endpoint {
         method: "GET",
         path: "/api/logs/histogram",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Distribution of latency, cost, or tokens",
         description: "Bucketed distribution for the analytics charts.",
         params: &[
@@ -477,7 +486,7 @@ whatever the filters select.",
     Endpoint {
         method: "GET",
         path: "/api/logs/timeseries",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Requests and errors over time",
         description: "Bucketed counts for the requests-over-time chart.",
         params: &[
@@ -490,7 +499,7 @@ whatever the filters select.",
     Endpoint {
         method: "GET",
         path: "/api/logs/rankings",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Top models, providers, or virtual keys",
         description: "Leaderboard over a chosen dimension and metric.",
         params: &[
@@ -505,10 +514,11 @@ whatever the filters select.",
     Endpoint {
         method: "GET",
         path: "/api/logs/filterdata",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Distinct values for the filter controls",
         description: "The providers, models, and virtual keys actually present in the log, so the \
-dashboard's filter dropdowns offer real options.",
+dashboard's filter dropdowns offer real options. A virtual-key caller gets only the values its own \
+traffic produced — the global key roster is not enumerable from a single key.",
         params: &[],
         example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/logs/filterdata",
         response: "",
@@ -516,7 +526,7 @@ dashboard's filter dropdowns offer real options.",
     Endpoint {
         method: "GET",
         path: "/api/sessions",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "Sessions — grouped AI-usage journeys",
         description: "Groups the request log by session id (from the `x-session-id` header, or the \
 OpenAI `user` / Anthropic `metadata.user_id` body hint) into per-session summaries: call count, \
@@ -536,11 +546,12 @@ user agent), so session-less traffic stays visible. Grouping is computed over th
     Endpoint {
         method: "GET",
         path: "/api/sessions/{id}",
-        auth: Auth::LogsView,
+        auth: Auth::ScopedRead,
         summary: "One session's full journey",
         description: "A session's summary plus every call in it, oldest first — the order the agent \
 made them. Powers the dashboard's session timeline and Sankey diagrams. 404 if the session id has \
-scrolled out of the recent log window.",
+scrolled out of the recent log window. A virtual-key caller sees the session as its own key saw it \
+(only its own calls); a session with none of them is a 404.",
         params: &[Param { name: "id", location: "path", ty: "string", required: true, description: "The session id." }],
         example: "curl -H \"authorization: Bearer $KG_ADMIN\" \\\n  http://localhost:8080/api/sessions/$SESSION_ID",
         response: "",
@@ -582,7 +593,9 @@ audio, rerank) each one implements.",
         path: "/api/config/virtual-keys",
         auth: Auth::LogsView,
         summary: "Virtual-key configuration",
-        description: "Configured virtual keys with their model allow/deny-lists, rate limits, and budgets.",
+        description: "Configured virtual keys with their model allow/deny-lists, rate limits, and budgets. \
+The key id **is** the bearer secret, so only `config:write` callers (operator / admin) receive it; a \
+viewer gets each key with the id masked (`id_masked: true`) but names and limits intact.",
         params: &[],
         example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/config/virtual-keys",
         response: "",
@@ -611,13 +624,15 @@ runtime picture behind the dashboard's settings pages.",
     Endpoint {
         method: "GET",
         path: "/api/whoami",
-        auth: Auth::LogsView,
-        summary: "The caller's role and permissions",
-        description: "Lets a client show or hide controls it isn't allowed to use, rather than \
-discovering it by getting a 403.",
+        auth: Auth::ScopedRead,
+        summary: "The caller's resolved identity",
+        description: "Who the presented credential is: `kind` is `token` (a control-plane token — \
+`role` and `name` follow), `virtual_key` (a data-plane key — `scoped_to` names it, reads are \
+restricted to its own traffic), or `open` (no auth configured; reported as an admin). Lets a client \
+show or hide controls it isn't allowed to use, rather than discovering it by getting a 403.",
         params: &[],
         example: "curl -H \"authorization: Bearer $KG_ADMIN\" http://localhost:8080/api/whoami",
-        response: r#"{"role": "admin", "permissions": ["logs:view", "config:write", "logs:reveal"]}"#,
+        response: r#"{"kind": "token", "role": "admin", "name": "admin_token", "permissions": ["logs:view", "config:write", "logs:reveal"]}"#,
     },
     Endpoint {
         method: "GET",

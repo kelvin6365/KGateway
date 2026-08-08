@@ -4,9 +4,23 @@
 export const BASE_URL =
   process.env.NEXT_PUBLIC_KGATEWAY_URL ?? "http://localhost:8080";
 
-// Admin token for control-plane write calls. Persisted in localStorage so it survives
-// reloads; only required when the gateway has `admin_token` configured.
+// The dashboard's access token for control-plane calls — an `admin_token` / `api_tokens`
+// entry (viewer / operator / admin), or a virtual key (which signs in scoped to its own
+// traffic). Persisted in localStorage so it survives reloads; only required once the
+// gateway has tokens or virtual keys configured. The storage key predates virtual-key
+// sign-in and is kept for back-compat.
 const ADMIN_TOKEN_KEY = "kgateway_admin_token";
+
+/**
+ * Thrown when the gateway answers 401 — the dashboard needs a (different) access token.
+ * The message intentionally stays the historical string some pages match on.
+ */
+export class AuthRequiredError extends Error {
+  constructor() {
+    super("admin token required");
+    this.name = "AuthRequiredError";
+  }
+}
 
 export function getAdminToken(): string {
   if (typeof window === "undefined") return "";
@@ -358,7 +372,7 @@ export async function getLogs(params: LogQueryParams = {}): Promise<LogPage> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<LogPage>;
   return { logs: body.logs ?? [], total: body.total ?? 0 };
@@ -370,7 +384,7 @@ export async function getLog(id: string): Promise<RequestLog> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (res.status === 404) throw new Error("log not found");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -437,7 +451,7 @@ export async function getSessions(params: SessionQueryParams = {}): Promise<Sess
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<SessionPage>;
   return { sessions: body.sessions ?? [], total: body.total ?? 0, unidentified: body.unidentified };
@@ -449,25 +463,38 @@ export async function getSession(id: string): Promise<SessionDetail> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (res.status === 404) throw new Error("session not found");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-/** GET /api/whoami response shape — the current token's role + granted permissions. */
+/** GET /api/whoami response shape — the caller's resolved identity. */
 export interface Whoami {
-  role: "viewer" | "operator" | "admin" | string;
+  /**
+   * What the presented credential is: a control-plane `token` (role + name follow), a
+   * `virtual_key` (data-plane key — reads are scoped to its own traffic), or `open`
+   * (gateway has no auth configured; reported as an admin). Older gateways omit this.
+   */
+  kind?: "token" | "virtual_key" | "open";
+  /** Null for virtual-key callers — they have no control-plane role. */
+  role: "viewer" | "operator" | "admin" | string | null;
+  /** The token's configured audit name, or the virtual key's display name. */
+  name?: string | null;
+  /** True when reads are server-side scoped (virtual-key callers). */
+  scoped?: boolean;
+  /** The virtual-key id this caller's reads are restricted to. */
+  scoped_to?: string;
   permissions: string[];
 }
 
-/** GET /api/whoami — role + permissions for the current admin token. */
+/** GET /api/whoami — resolved identity + permissions for the stored access token. */
 export async function getWhoami(): Promise<Whoami> {
   const res = await fetch(`${BASE_URL}/api/whoami`, {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -489,7 +516,7 @@ export async function revealLog(id: string): Promise<RevealedLog> {
     `${BASE_URL}/api/logs/${encodeURIComponent(id)}/reveal`,
     { cache: "no-store", headers: adminHeaders() },
   );
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (res.status === 403) throw new Error("reveal requires admin");
   if (res.status === 400) throw new Error("redaction not enabled");
   if (res.status === 404) throw new Error("log not found");
@@ -503,7 +530,7 @@ export async function getDroppedCount(): Promise<number> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as { dropped?: number };
   return body.dropped ?? 0;
@@ -516,7 +543,7 @@ export async function getLogStats(filters: LogStatsFilters = {}): Promise<LogSta
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -530,7 +557,7 @@ export async function getTimeseries(
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<TimeseriesResponse>;
   return { points: body.points ?? [] };
@@ -543,7 +570,7 @@ export async function getHistogram(params: HistogramParams = {}): Promise<Histog
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<Histogram>;
   return {
@@ -562,7 +589,7 @@ export async function getRankings(
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<RankingsResponse>;
   return { rankings: body.rankings ?? [] };
@@ -574,7 +601,7 @@ export async function getFilterData(): Promise<FilterData> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as Partial<FilterData>;
   return {
@@ -592,9 +619,13 @@ export function logStreamUrl(token: string): string {
   return `${BASE_URL}/api/logs/stream?token=${encodeURIComponent(token)}`;
 }
 
-/** GET /api/mcp/tools — MCP tools registered on the gateway. */
+/** GET /api/mcp/tools — MCP tools registered on the gateway (token-only read). */
 export async function getMcpTools(): Promise<McpTool[]> {
-  const res = await fetch(`${BASE_URL}/api/mcp/tools`, { cache: "no-store" });
+  const res = await fetch(`${BASE_URL}/api/mcp/tools`, {
+    cache: "no-store",
+    headers: adminHeaders(),
+  });
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as { tools?: McpTool[] };
   return body.tools ?? [];
@@ -680,7 +711,7 @@ export async function getProviders(): Promise<ProviderSummary[]> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as {
     providers?: ProviderSummary[];
@@ -743,6 +774,11 @@ export interface VirtualKey {
   max_cost_per_period?: number | null;
   /** Length of the cost-budget period, in seconds (defaults to 60 when a cost cap is set). */
   max_cost_period_secs?: number | null;
+  /**
+   * True when the gateway masked `id` (the id is the bearer secret) because the caller is
+   * a viewer. Operator/admin callers get the real id and no flag.
+   */
+  id_masked?: boolean;
 }
 
 export type VirtualKeyInput = Omit<VirtualKey, "id">;
@@ -753,7 +789,7 @@ export async function getVirtualKeys(): Promise<VirtualKey[]> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json().catch(() => ({}))) as {
     virtual_keys?: VirtualKey[];
@@ -903,7 +939,7 @@ export async function getStatus(): Promise<Status> {
     cache: "no-store",
     headers: adminHeaders(),
   });
-  if (res.status === 401) throw new Error("admin token required");
+  if (res.status === 401) throw new AuthRequiredError();
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
