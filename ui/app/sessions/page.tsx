@@ -6,7 +6,7 @@
 // an operator can scan for problems. Everything is derived from the /api/sessions summary
 // (see lib/session-insights) — no extra calls.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import {
@@ -18,12 +18,8 @@ import {
   Repeat,
   Search,
 } from "lucide-react";
-import {
-  getSessions,
-  getAdminToken,
-  setAdminToken,
-  type SessionSummary,
-} from "@/lib/api";
+import { AuthRequiredError, getSessions, type SessionSummary } from "@/lib/api";
+import { TokenGate } from "@/components/token-gate";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -277,9 +273,6 @@ export default function SessionsPage() {
   const [sort, setSort] = useState<ClientSort>("attention");
   const [search, setSearch] = useState("");
   const [erroredOnly, setErroredOnly] = useState(false);
-  const [adminTok, setAdminTokState] = useState("");
-
-  useEffect(() => setAdminTokState(getAdminToken()), []);
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["sessions", "recent"],
@@ -358,10 +351,11 @@ export default function SessionsPage() {
   }, [all, search, erroredOnly, sort, now]);
 
   const listScope = useStaggerReveal<HTMLDivElement>();
-  const needsToken = (error as Error | undefined)?.message === "admin token required";
+  const needsToken = error instanceof AuthRequiredError;
 
   return (
     <div className="flex flex-col gap-5">
+      <TokenGate>
       {/* header */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -371,15 +365,6 @@ export default function SessionsPage() {
             failing, and the runaways at a glance.
           </p>
         </div>
-        <Input
-          type="password"
-          value={adminTok}
-          onChange={(e) => setAdminTokState(e.target.value)}
-          onBlur={() => setAdminToken(adminTok)}
-          onKeyDown={(e) => e.key === "Enter" && setAdminToken(adminTok)}
-          placeholder="admin token"
-          className="h-9 w-40 text-xs"
-        />
       </div>
 
       {isLoading && <Skeleton className="h-96 w-full rounded-xl" />}
@@ -388,7 +373,7 @@ export default function SessionsPage() {
         <Card className="py-4">
           <CardContent className="text-sm text-muted-foreground">
             {needsToken
-              ? "This gateway requires an admin token. Enter it above to view sessions."
+              ? "Access token required — see Settings."
               : `Could not load sessions: ${(error as Error).message}`}
           </CardContent>
         </Card>
@@ -488,6 +473,7 @@ export default function SessionsPage() {
           </p>
         </>
       )}
+      </TokenGate>
     </div>
   );
 }

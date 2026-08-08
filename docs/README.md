@@ -40,7 +40,7 @@ KGateway implements a proven gateway architecture in **Rust** for:
 | [05-frontend.md](./05-frontend.md) | Next.js dashboard plan, pages, API contract |
 | [06-deployment.md](./06-deployment.md) | Docker, Helm, config model, benchmarks |
 | [07-quality.md](./07-quality.md) | Per-part testing + code-review process |
-| [09-security.md](./09-security.md) | Security review findings + resolution status |
+| [09-security.md](./09-security.md) | Security review findings + resolution status, and the access model (tokens vs virtual keys, per-key read scoping) |
 | [15-performance.md](./15-performance.md) | Benchmarks and the measured per-request overhead |
 | [16-configuration.md](./16-configuration.md) | **Complete `config.json` reference** — every field, type, default |
 

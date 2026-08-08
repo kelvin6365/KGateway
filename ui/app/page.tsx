@@ -9,11 +9,10 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowRight, Boxes, Database, KeyRound, Wrench } from "lucide-react";
 import {
   BASE_URL,
-  getAdminToken,
   getDroppedCount,
   getLogs,
   getLogStats,
@@ -24,16 +23,15 @@ import {
   getTimeseries,
   getVirtualKeys,
   health,
-  setAdminToken,
   type LogStatsFilters,
   type RankBy,
   type RankMetric,
   type RequestLog,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { TokenGate } from "@/components/token-gate";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   ChartCard,
   RANK_METRICS,
@@ -330,19 +328,8 @@ function cnClient(label: string): string {
 }
 
 export default function DashboardPage() {
-  const qc = useQueryClient();
   const scope = useStaggerReveal<HTMLDivElement>();
-
-  // --- admin token (same affordance as the Logs page) ---
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const hasToken = typeof window !== "undefined" && !!getAdminToken();
-
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    qc.invalidateQueries();
-  }
+  const { hasToken, isScoped } = useAuth();
 
   // --- time range drives every aggregate below ---
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
@@ -371,11 +358,7 @@ export default function DashboardPage() {
   });
 
   // --- aggregates (admin-gated when the gateway has admin_token set) ---
-  const {
-    data: stats,
-    isError: statsError,
-    error: statsErrorObj,
-  } = useQuery({
+  const { data: stats } = useQuery({
     queryKey: ["logs-stats", filters],
     queryFn: () => getLogStats(filters),
     retry: false,
@@ -448,9 +431,6 @@ export default function DashboardPage() {
     refetchInterval: ERRORS_POLL_MS,
   });
 
-  const authError =
-    statsError && (statsErrorObj as Error | undefined)?.message === "admin token required";
-
   const status = healthLoading
     ? { label: "Checking…", color: "var(--muted-foreground)" }
     : healthy
@@ -466,6 +446,7 @@ export default function DashboardPage() {
 
   return (
     <div ref={scope} className="flex flex-col gap-6">
+      <TokenGate>
       {/* Header: identity + health + window */}
       <div data-reveal className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -473,6 +454,16 @@ export default function DashboardPage() {
           <p className="text-sm text-muted-foreground">
             Gateway at <code className="font-mono">{BASE_URL}</code>
           </p>
+          {isScoped && (
+            <span className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ background: "var(--warning)" }}
+                aria-hidden
+              />
+              Scoped view — showing only traffic for your virtual key
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {hasToken && !!droppedCount && droppedCount > 0 && (
@@ -496,41 +487,6 @@ export default function DashboardPage() {
           />
         </div>
       </div>
-
-      {/* Admin token affordance (gateway in strict mode) */}
-      {authError && (
-        <Card data-reveal className="py-4">
-          <CardContent className="flex flex-col gap-2">
-            <div className="text-sm font-semibold">Admin token required</div>
-            <p className="text-xs text-muted-foreground">
-              This gateway has <code>admin_token</code> configured — dashboard metrics need it.
-            </p>
-            {showAdmin ? (
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  value={adminTok}
-                  onChange={(e) => setAdminTok(e.target.value)}
-                  placeholder="Bearer token for /api/*"
-                />
-                <Button onClick={saveAdmin}>Save</Button>
-              </div>
-            ) : (
-              <div>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setAdminTok(getAdminToken());
-                    setShowAdmin(true);
-                  }}
-                >
-                  Set admin token
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
 
       {/* Hero stats */}
       <div data-reveal className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -658,6 +614,7 @@ export default function DashboardPage() {
           note={(mcpTools?.length ?? 0) > 0 ? "exposed to models" : "none registered"}
         />
       </div>
+      </TokenGate>
     </div>
   );
 }

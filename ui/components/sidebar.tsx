@@ -20,6 +20,7 @@ import {
 import { OrnamentDivider } from "@/components/baroque/ornament-divider";
 import { useTheme } from "@/components/baroque/use-theme";
 import { GitHubStarButton } from "@/components/github-star-button";
+import { IdentityBadge } from "@/components/identity-badge";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -81,9 +82,10 @@ export function Sidebar() {
           </Link>
         );
       })}
-      {/* Repo star link + theme switch: Midnight (dark) ⇄ Porcelain (light) */}
+      {/* Who is signed in + repo star link + theme switch: Midnight ⇄ Porcelain */}
       <div className="mt-auto">
         <OrnamentDivider className="mb-2 px-1" />
+        <IdentityBadge />
         <GitHubStarButton />
         <button
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}

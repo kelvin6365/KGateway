@@ -30,7 +30,7 @@ Unknown top-level keys are ignored. Every field is optional except where noted; 
 | `database` | string? | *none* (in-memory) | SQLite or Postgres URL for request-log persistence. `sqlite://` → `SqliteLogStore`, `postgres://` → `PostgresLogStore`. Supports `${ENV}`. |
 | `admin_token` | string? | *none* (control plane open) | Legacy single control-plane token. When set, `/api/*` and `/metrics` require `Authorization: Bearer <token>`; treated as an **admin**-role token. Supports `${ENV}`. |
 | `api_tokens` | [[ApiTokenConfig](#apitokenconfig--role)] | `[]` | RBAC bearer-token → role bindings (M11). Coexist with `admin_token`. |
-| `virtual_keys` | [[VirtualKeyConfig](#virtualkeyconfig)] | `[]` | Data-plane governance keys. When non-empty, governance runs in **strict** mode (every request must present a known `Authorization: Bearer <id>`). |
+| `virtual_keys` | [[VirtualKeyConfig](#virtualkeyconfig)] | `[]` | Data-plane governance keys. When non-empty, governance runs in **strict** mode (every request must present a known `Authorization: Bearer <id>`), control-plane reads stop being anonymous, and each key doubles as a **scoped read identity**: presented to the log/session/analytics APIs it sees only its own traffic (see [09-security](./09-security.md#access-model--tokens-vs-virtual-keys)). |
 | `semantic_cache` | [SemanticCacheConfig](#semanticcacheconfig)? | *none* (off) | Embedding-similarity response cache. |
 | `mcp` | [McpConfig](#mcpconfig)? | *none* (off) | Model Context Protocol tool gateway for agentic tool-calling. |
 | `request_timeout_secs` | u64? | *none* (`120`) | Global per-request timeout in seconds; exceeding it returns `408 Request Timeout`. |
@@ -116,7 +116,7 @@ Serialized lowercase. Permissions are cumulative (each role includes the ones be
 
 | Role | Permissions | Permits |
 |---|---|---|
-| `viewer` (default) | `logs:view`, `metrics:view` | Read logs, metrics, analytics, and config. Least privilege. |
+| `viewer` (default) | `logs:view`, `metrics:view` | Read logs, metrics, analytics, and config — for **all** virtual keys' traffic. Virtual-key ids in `GET /api/config/virtual-keys` come back masked (`id_masked`) at this role: the id is the bearer secret. Least privilege. |
 | `operator` | viewer + `config:write` | Also mutate config — add/edit/remove providers and virtual keys. |
 | `admin` | operator + `logs:reveal` | Also **reveal** redacted log content (`GET /api/logs/{id}/reveal`). |
 

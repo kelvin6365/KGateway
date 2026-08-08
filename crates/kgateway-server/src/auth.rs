@@ -125,6 +125,72 @@ impl AuthContext {
     }
 }
 
+/// Resolved identity of a control-plane read caller. Control tokens (any role) read all
+/// data; a virtual key authenticates for reads but is force-scoped to its own rows —
+/// handlers on scoped routes receive this via `Extension<Caller>` and must apply
+/// [`Caller::scope`] to every store query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// Auth fully open: no tokens declared AND no virtual keys configured (dev mode).
+    Open,
+    /// A control-plane token — sees all data; `role` gates write/reveal as usual.
+    Token { role: Role, name: String },
+    /// A virtual key — reads are restricted to rows this key produced.
+    VirtualKey { id: String },
+}
+
+impl Caller {
+    /// The virtual-key id this caller's reads must be scoped to, if any.
+    pub fn scope(&self) -> Option<&str> {
+        match self {
+            Caller::VirtualKey { id } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+impl AuthContext {
+    /// Resolve a read caller from a presented bearer value against the token table plus the
+    /// live virtual-key id set. A value present in both tables resolves as a control token
+    /// (tokens win). `enforced == false` short-circuits to [`Caller::Open`]; otherwise a
+    /// missing/unknown bearer yields `None` (→ 401).
+    ///
+    /// Virtual-key ids are config plaintext (never `${ENV}`-interpolated), so a locked
+    /// token table (declared-but-empty, see [`AuthContext::is_locked`]) does NOT disable
+    /// virtual-key read auth — those callers still authenticate, and only ever scoped to
+    /// their own rows.
+    pub fn resolve_caller<'a>(
+        &self,
+        enforced: bool,
+        vkey_ids: impl IntoIterator<Item = &'a str>,
+        presented: Option<&str>,
+    ) -> Option<Caller> {
+        if !enforced {
+            return Some(Caller::Open);
+        }
+        let presented = presented?;
+        // `Authorization: Bearer ` (empty after trim) is absent, not a credential — and a
+        // misconfigured empty vkey id must never make it one.
+        if presented.is_empty() {
+            return None;
+        }
+        if let Some((role, name)) = self.identify(presented) {
+            return Some(Caller::Token { role, name });
+        }
+        // Same no-early-break scan as `identify` (and the same non-constant-time caveat).
+        let mut found = None;
+        for id in vkey_ids {
+            if !id.is_empty()
+                && id.len() == presented.len()
+                && id.as_bytes() == presented.as_bytes()
+            {
+                found = Some(Caller::VirtualKey { id: id.to_string() });
+            }
+        }
+        found
+    }
+}
+
 /// Extract a `Bearer` token from the `Authorization` header.
 pub fn bearer_token(req: &Request) -> Option<&str> {
     req.headers()
@@ -167,9 +233,57 @@ async fn require(state: &SharedState, req: Request, next: Next, perm: Permission
     }
 }
 
-/// Middleware: require `logs:view` (any authenticated role).
-pub async fn require_view(State(state): State<SharedState>, req: Request, next: Next) -> Response {
-    require(&state, req, next, Permission::LogsView).await
+/// Whether read endpoints are enforced: token auth enabled OR any virtual keys configured.
+/// The first virtual key closes anonymous reads the same way it switches the data plane to
+/// strict mode; a fully token-less, key-less config stays open (dev). Takes the caller's
+/// already-loaded config snapshot so one request never mixes two snapshots across a
+/// concurrent hot-reload.
+pub(crate) fn read_enforced(auth: &AuthContext, config: &crate::config::Config) -> bool {
+    auth.is_enabled() || !config.virtual_keys.is_empty()
+}
+
+/// Middleware for scoped-read endpoints (logs / sessions / analytics / whoami): control
+/// tokens of any role pass and see everything; a virtual key passes but is force-scoped to
+/// its own rows. Inserts the resolved [`Caller`] as a request extension for handlers.
+pub async fn require_scoped_read(
+    State(state): State<SharedState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let presented = bearer_token(&req).map(str::to_owned);
+    let config = state.config.load();
+    let caller = state.auth.resolve_caller(
+        read_enforced(&state.auth, &config),
+        config.virtual_keys.iter().map(|vk| vk.id.as_str()),
+        presented.as_deref(),
+    );
+    match caller {
+        Some(caller) => {
+            req.extensions_mut().insert(caller);
+            next.run(req).await
+        }
+        None => unauthorized(),
+    }
+}
+
+/// Middleware for token-only read endpoints (metrics, status, provider + key config):
+/// like the scoped-read gate, but virtual keys are rejected here (401): they are
+/// data-plane credentials with no control-plane role. Also enforced in a
+/// vkeys-without-tokens deployment — the moment strict mode starts, provider config and
+/// the key list stop being anonymous.
+pub async fn require_token_view(
+    State(state): State<SharedState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !read_enforced(&state.auth, &state.config.load()) {
+        return next.run(req).await; // open (dev) mode
+    }
+    match bearer_token(&req).and_then(|t| state.auth.role_for(t)) {
+        Some(role) if role.permits(Permission::LogsView) => next.run(req).await,
+        Some(_) => forbidden(),
+        None => unauthorized(),
+    }
 }
 
 /// Middleware: require `config:write` (operator / admin).
@@ -178,11 +292,19 @@ pub async fn require_write(State(state): State<SharedState>, req: Request, next:
 }
 
 /// Middleware: require `logs:reveal` (admin).
+///
+/// Unlike config writes — deliberately left open in a vkeys-without-tokens deployment so
+/// the dashboard that created the first key isn't locked out — reveal is a *read*, and the
+/// most sensitive one (decrypted redaction mappings). It locks with the rest of the read
+/// plane: once reads are enforced and no admin token can exist, every reveal is 401.
 pub async fn require_reveal(
     State(state): State<SharedState>,
     req: Request,
     next: Next,
 ) -> Response {
+    if !state.auth.is_enabled() && read_enforced(&state.auth, &state.config.load()) {
+        return unauthorized();
+    }
     require(&state, req, next, Permission::LogsReveal).await
 }
 
@@ -338,6 +460,92 @@ mod tests {
         // Legacy admin_token gets a stable audit name.
         let legacy = AuthContext::from_config(Some("x"), &[]);
         assert_eq!(legacy.identify("x").unwrap().1, "admin_token");
+    }
+
+    #[test]
+    fn caller_open_only_when_not_enforced() {
+        let ctx = AuthContext::from_config(None, &[]);
+        // Not enforced: any bearer (or none) resolves to Open.
+        assert_eq!(ctx.resolve_caller(false, [], None), Some(Caller::Open));
+        assert_eq!(
+            ctx.resolve_caller(false, [], Some("anything")),
+            Some(Caller::Open)
+        );
+        // Enforced (e.g. vkeys exist): anonymous and unknown are rejected.
+        assert_eq!(ctx.resolve_caller(true, ["vk1"], None), None);
+        assert_eq!(ctx.resolve_caller(true, ["vk1"], Some("nope")), None);
+    }
+
+    #[test]
+    fn caller_resolves_tokens_and_virtual_keys() {
+        let ctx = AuthContext::from_config(Some("admin-tok"), &[tok("view-tok", Role::Viewer)]);
+        assert_eq!(
+            ctx.resolve_caller(true, ["vk1"], Some("admin-tok")),
+            Some(Caller::Token {
+                role: Role::Admin,
+                name: "admin_token".into()
+            })
+        );
+        assert_eq!(
+            ctx.resolve_caller(true, ["vk1"], Some("vk1")),
+            Some(Caller::VirtualKey { id: "vk1".into() })
+        );
+        assert_eq!(
+            ctx.resolve_caller(true, ["vk1"], Some("view-tok"))
+                .unwrap()
+                .scope(),
+            None,
+            "control tokens are never scoped"
+        );
+        assert_eq!(
+            ctx.resolve_caller(true, ["vk1"], Some("vk1"))
+                .unwrap()
+                .scope(),
+            Some("vk1")
+        );
+    }
+
+    #[test]
+    fn caller_token_wins_over_vkey_on_collision() {
+        // The same string in both tables must resolve as a control token, not a vkey.
+        let ctx = AuthContext::from_config(None, &[tok("shared", Role::Viewer)]);
+        assert_eq!(
+            ctx.resolve_caller(true, ["shared"], Some("shared")),
+            Some(Caller::Token {
+                role: Role::Viewer,
+                name: "viewer".into()
+            })
+        );
+    }
+
+    #[test]
+    fn empty_bearer_and_empty_vkey_id_never_authenticate() {
+        let ctx = AuthContext::from_config(None, &[]);
+        // A misconfigured empty vkey id must not turn `Bearer ` into a credential.
+        assert_eq!(ctx.resolve_caller(true, [""], Some("")), None);
+        assert_eq!(ctx.resolve_caller(true, ["", "vk1"], Some("")), None);
+        // Real ids alongside an empty one still work.
+        assert_eq!(
+            ctx.resolve_caller(true, ["", "vk1"], Some("vk1")),
+            Some(Caller::VirtualKey { id: "vk1".into() })
+        );
+    }
+
+    #[test]
+    fn locked_token_table_still_authenticates_vkeys_scoped() {
+        // Fail-closed token table (declared but unresolved) must not disable vkey read
+        // auth: vkey ids are config plaintext, and those callers only ever see their own
+        // rows anyway.
+        let ctx = AuthContext::from_config(
+            None,
+            &[tok("${KGATEWAY_DEFINITELY_MISSING_ENV_XYZ}", Role::Admin)],
+        );
+        assert!(ctx.is_locked());
+        assert_eq!(
+            ctx.resolve_caller(true, ["vk1"], Some("vk1")),
+            Some(Caller::VirtualKey { id: "vk1".into() })
+        );
+        assert_eq!(ctx.resolve_caller(true, ["vk1"], Some("random")), None);
     }
 
     #[test]

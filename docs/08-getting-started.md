@@ -312,7 +312,10 @@ provider rankings), **MCP** (tools), **Providers** and **Virtual Keys** (live ad
 
 The `/api/*` control plane and `/metrics` power the dashboard and are scriptable directly. When
 `admin_token` or `api_tokens` are set they require `Authorization: Bearer <token>` (see the
-[RBAC roles](./16-configuration.md#apitokenconfig--role)).
+[RBAC roles](./16-configuration.md#apitokenconfig--role)). Once any `virtual_keys` exist, the
+log/session/analytics reads require a credential too — and a **virtual key** works there as a
+scoped identity: it sees only its own traffic (the access model is detailed in
+[09-security](./09-security.md#access-model--tokens-vs-virtual-keys)).
 
 ```bash
 curl localhost:8080/metrics                 # Prometheus text

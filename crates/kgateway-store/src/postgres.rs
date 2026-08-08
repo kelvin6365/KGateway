@@ -532,22 +532,27 @@ impl LogStore for PostgresLogStore {
             .collect())
     }
 
-    async fn filter_values(&self) -> Result<FilterData, StoreError> {
-        let providers: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT provider FROM request_logs WHERE provider IS NOT NULL ORDER BY provider",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let models: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT model FROM request_logs WHERE model IS NOT NULL ORDER BY model",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let virtual_keys: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT virtual_key FROM request_logs WHERE virtual_key IS NOT NULL ORDER BY virtual_key",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn filter_values(&self, filter: &LogFilter) -> Result<FilterData, StoreError> {
+        // Each statement is its own query, so `$N` numbering restarts at 1 every time.
+        let (frag, binds, _) = filter_where(filter, PlaceholderStyle::Dollar, 1);
+        let sql = format!(
+            "SELECT DISTINCT provider FROM request_logs WHERE provider IS NOT NULL{frag} ORDER BY provider"
+        );
+        let providers: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
+        let sql = format!(
+            "SELECT DISTINCT model FROM request_logs WHERE model IS NOT NULL{frag} ORDER BY model"
+        );
+        let models: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
+        let sql = format!(
+            "SELECT DISTINCT virtual_key FROM request_logs WHERE virtual_key IS NOT NULL{frag} ORDER BY virtual_key"
+        );
+        let virtual_keys: Vec<String> = bind_filter!(sqlx::query_scalar::<_, String>(&sql), &binds)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(FilterData {
             providers,
             models,

@@ -59,6 +59,39 @@ is admin-config, client `model` never reaches a URL); **path traversal** (multip
 `eval`, or client-side secret exposure); Helm (`existingSecret` escape hatch, no hardcoded
 secrets).
 
+## Access model — tokens vs virtual keys
+
+Two credential classes exist, and they answer different questions:
+
+| Credential | Configured in | Data plane (`/v1/*`) | Read APIs (logs / sessions / analytics) | Config writes / reveal |
+|---|---|---|---|---|
+| **Access token** (`admin_token`, `api_tokens` — viewer / operator / admin) | config, `${ENV}`-interpolated | no | **all data, every key** | per role (`config:write` operator+, `logs:reveal` admin) |
+| **Virtual key** | config plaintext (`virtual_keys[].id` *is* the bearer secret) | yes (strict mode) | **only its own rows** — the `virtual_key` filter is forced server-side | never — 401 |
+
+Rules of the model:
+
+- **Open mode** — no tokens declared *and* no virtual keys: every API is open (dev). The
+  first virtual key ends open mode for reads the same way it flips the data plane to strict.
+- **Scoped reads** — a virtual key presented to `/api/logs*`, `/api/sessions*` or
+  `/api/whoami` authenticates, but the response is force-restricted to that key's own
+  traffic: list/aggregate endpoints get a server-side `virtual_key` override (the caller's
+  own query param is ignored), `/api/logs/{id}` and `/api/sessions/{id}` return the same
+  404 for another key's row as for a missing one (no existence oracle), `filterdata` can't
+  enumerate the key roster, and the SSE tail only carries the key's own events.
+- **Token-only surfaces** — `/metrics`, `/api/status`, `/api/providers`,
+  `/api/config/*`, `/api/mcp/tools`, `/api/logs/dropped` reject virtual keys outright.
+- **Key-id masking** — `GET /api/config/virtual-keys` returns real ids only to callers
+  holding `config:write` (they could rewrite the keys anyway); viewers get masked ids with
+  `id_masked: true`.
+- **Fail-closed unchanged** — a declared-but-unresolved token table still locks token
+  auth; virtual keys (config plaintext, never `${ENV}`) keep authenticating, scoped.
+- **Caveat: virtual keys without tokens.** Reads then require a key (scoped) and reveal
+  locks outright (no admin credential can exist, and reveal is the most sensitive read),
+  but config *writes* remain unauthenticated — an anonymous caller could edit providers
+  or delete keys. Left open deliberately so the dashboard that created the first key
+  isn't locked out; the gateway logs a startup warning for this shape. Set an
+  `admin_token` in any real deployment.
+
 ## Posture
 
 Ready for untrusted clients with `admin_token` set and governance configured. Secret-handling

@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Sun, Moon } from "lucide-react";
-import { getStatus, getAdminToken, setAdminToken, type StatusFeatures } from "@/lib/api";
+import { AuthRequiredError, getStatus, type StatusFeatures } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { TokenGate, TokenPrompt } from "@/components/token-gate";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { OrnamentDivider } from "@/components/baroque/ornament-divider";
 import { EmptyState } from "@/components/baroque/empty-state";
@@ -31,17 +30,56 @@ const FEATURE_LABELS: Record<keyof StatusFeatures, string> = {
   otlp: "OTLP",
 };
 
-export default function SettingsPage() {
-  const qc = useQueryClient();
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [tokenVersion, setTokenVersion] = useState(0);
-  const [hasToken, setHasToken] = useState(false);
-  const [theme, setTheme] = useTheme();
+/** Who the stored credential resolves to, as a row of badges. */
+function IdentityBadges() {
+  const { identity, status, hasToken } = useAuth();
 
-  useEffect(() => {
-    setHasToken(!!getAdminToken());
-  }, [tokenVersion]);
+  if (status === "loading") {
+    return <span className="text-sm text-muted-foreground">Resolving identity…</span>;
+  }
+  if (status === "open") {
+    return (
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <Badge variant="outline">open gateway</Badge>
+        <span className="text-muted-foreground">
+          No <code>admin_token</code>, <code>api_tokens</code> or virtual keys are configured
+          — every caller has full access.
+        </span>
+      </div>
+    );
+  }
+  if (status !== "authed" || !identity) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <Badge variant="outline" className="text-muted-foreground">
+          {hasToken ? "token rejected" : "not signed in"}
+        </Badge>
+        <span className="text-muted-foreground">
+          {status === "error"
+            ? "The gateway did not answer GET /api/whoami."
+            : "This gateway requires a credential — enter one below."}
+        </span>
+      </div>
+    );
+  }
+
+  const isVkey = identity.kind === "virtual_key";
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Badge variant="default">{isVkey ? "virtual key" : "access token"}</Badge>
+      {identity.role && <Badge variant="outline">role: {identity.role}</Badge>}
+      {identity.name && <span className="font-medium">{identity.name}</span>}
+      {identity.scoped_to && (
+        <Badge variant="outline" className="font-mono text-muted-foreground">
+          scoped to {identity.scoped_to}
+        </Badge>
+      )}
+    </div>
+  );
+}
+
+export default function SettingsPage() {
+  const [theme, setTheme] = useTheme();
 
   const {
     data: status,
@@ -54,88 +92,62 @@ export default function SettingsPage() {
     retry: false,
   });
 
-  const authError = (error as Error | undefined)?.message === "admin token required";
-
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    setTokenVersion((v) => v + 1);
-    qc.invalidateQueries();
-  }
-
-  function clearAdmin() {
-    setAdminToken("");
-    setAdminTok("");
-    setTokenVersion((v) => v + 1);
-    qc.invalidateQueries();
-  }
-
   return (
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="font-display text-3xl font-semibold tracking-wide">Settings</h1>
         <p className="text-sm text-muted-foreground">
-          Read-only summary of the gateway&apos;s live configuration, plus the admin token
-          used by this dashboard for control-plane calls.
+          Read-only summary of the gateway&apos;s live configuration, plus the credential
+          this dashboard uses for control-plane calls.
         </p>
       </div>
 
-      {/* Admin token */}
+      {/* Tokens & access — deliberately outside the gate so the credential can always
+          be changed, including after signing in with one that can't see this page. */}
       <Card>
         <CardHeader>
-          <CardTitle>Admin token</CardTitle>
+          <CardTitle>Tokens &amp; access</CardTitle>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="text-sm text-muted-foreground">
-            Status:{" "}
-            {hasToken ? (
-              <span className="font-medium text-success">set</span>
-            ) : (
-              <span className="font-medium">not set</span>
-            )}
-            . Only needed if the gateway has <code>admin_token</code> configured. Stored in
-            this browser&apos;s <code>localStorage</code> and sent as{" "}
-            <code>Authorization: Bearer &lt;token&gt;</code> to all <code>/api/*</code> calls.
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Signed in as
+            </div>
+            <IdentityBadges />
           </div>
-          {!showAdmin ? (
-            <div>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setAdminTok(getAdminToken());
-                  setShowAdmin(true);
-                }}
-              >
-                {hasToken ? "Change token" : "Set token"}
-              </Button>
+
+          <div className="flex flex-col gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Change credential
             </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <Label>Admin token</Label>
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  value={adminTok}
-                  onChange={(e) => setAdminTok(e.target.value)}
-                  placeholder="Bearer token for /api/*"
-                />
-                <Button onClick={saveAdmin}>Save</Button>
-                <Button variant="ghost" onClick={() => setShowAdmin(false)}>
-                  Cancel
-                </Button>
-              </div>
-              {hasToken && (
-                <div>
-                  <button
-                    onClick={clearAdmin}
-                    className="text-xs text-muted-foreground underline"
-                  >
-                    Clear stored token
-                  </button>
-                </div>
-              )}
+            <TokenPrompt inline />
+            <p className="text-xs text-muted-foreground">
+              Stored in this browser&apos;s <code>localStorage</code> and sent as{" "}
+              <code>Authorization: Bearer &lt;token&gt;</code> on every <code>/api/*</code>{" "}
+              call.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2 border-t pt-4">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              How access works
             </div>
-          )}
+            <ul className="ml-4 flex list-disc flex-col gap-1.5 text-sm text-muted-foreground">
+              <li>
+                <code>admin_token</code> — a single admin access token: full read, config
+                writes, and reveal of redacted content.
+              </li>
+              <li>
+                <code>api_tokens</code> — named tokens with a role. <strong>viewer</strong>{" "}
+                reads all data; <strong>operator</strong> adds config writes;{" "}
+                <strong>admin</strong> adds revealing redacted content.
+              </li>
+              <li>
+                <strong>Virtual keys</strong> — data-plane API keys. They may also sign in
+                here, but every read is scoped to their own traffic.
+              </li>
+            </ul>
+          </div>
         </CardContent>
       </Card>
 
@@ -162,13 +174,14 @@ export default function SettingsPage() {
 
       <OrnamentDivider />
 
-      {/* Config summary */}
+      {/* Config summary — /api/status rejects virtual keys, so it needs a real token. */}
+      <TokenGate need="token">
       {isError ? (
         <EmptyState
           title="Could not load gateway status"
           hint={
-            authError
-              ? "The gateway requires an admin token — set one above."
+            error instanceof AuthRequiredError
+              ? "Access token required — see Tokens & access above."
               : "The gateway did not respond to GET /api/status."
           }
         />
@@ -244,6 +257,7 @@ export default function SettingsPage() {
           </Card>
         </div>
       ) : null}
+      </TokenGate>
     </div>
   );
 }

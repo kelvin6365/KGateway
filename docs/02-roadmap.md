@@ -401,6 +401,32 @@ CORS thought — the existing Playground page already sends real chats, so the g
 
 ---
 
+## M27 — Per-virtual-key read scoping + dashboard identity ✅ DONE
+
+**Goal:** make the access model explicit and enforced — who holds which credential sees exactly
+what — and have the dashboard explain it instead of hiding it behind eight token prompts.
+
+- [x] **Virtual keys as scoped read identities** — a vkey bearer on `/api/logs*`,
+  `/api/sessions*`, `/api/whoami` and the SSE tail authenticates, force-scoped server-side to
+  its own traffic: caller filter params can't widen it, foreign detail rows 404 identically to
+  missing ones, `filterdata` can't enumerate the key roster. Control tokens (any role) still
+  see everything; open mode (no tokens, no keys) unchanged; the first vkey ends anonymous
+  reads like it flips the data plane strict.
+- [x] **Token-only surfaces** — `/metrics`, `/api/status`, provider/key config, MCP tools and
+  the dropped counter reject virtual keys; `/api/config/virtual-keys` masks key ids
+  (`id_masked`) for viewer-role callers (the id is the bearer secret).
+- [x] **Hardening** — reveal locks in a vkeys-without-tokens deployment; empty ids / empty
+  bearers never authenticate; vkey↔token collisions warn at startup; `whoami` reports the
+  resolved identity (`kind` / `name` / `scoped_to`).
+- [x] **Dashboard** — shared `AuthProvider` + `TokenGate` replace the duplicated prompts, a
+  sidebar identity badge shows kind/role/permissions, Settings explains access tokens vs
+  virtual keys, scoped sign-ins get a scoped view with explanatory gates.
+- [x] Tests: caller-resolution unit matrix + e2e (scoping incl. override attempts, 404
+  semantics, SSE filtering, vkey 401s, immediate revocation, masking, reveal lockdown,
+  open-mode regression). Full workspace gate green.
+
+---
+
 ## 🎉 M0–M9 complete
 
 KGateway is a working, tested Rust + Next.js LLM gateway: **13 providers**, multimodal (chat/embeddings/images/audio/rerank), failover + load-balancing + per-provider isolation, a capability-segmented plugin pipeline, governance (virtual keys / budgets / rate limits), SQLite **and** Postgres persistence, semantic cache, Prometheus metrics, agentic MCP tool-calling, a live Next.js dashboard, Docker + Helm deployment, and ~2.8 µs per-request overhead — every milestone runtime-verified. Remaining items are explicit follow-ons (transport-heavy connectors: Bedrock/Vertex/Azure; real MCP transport via `rmcp`; OTLP export; live-config write APIs), and the architecture is ready for each.

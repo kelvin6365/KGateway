@@ -28,7 +28,7 @@ The dashboard is built on **Next.js App Router + Tailwind + shadcn/ui**. shadcn 
 | `/mcp` | MCP servers and the tools they expose | `/api/mcp/tools` | M8 |
 | `/plugins` | which plugins are active in the pipeline, and why | `/api/status` | M8 |
 | `/docs` | generated API reference: every endpoint grouped by auth tier, cURL/Python/JS samples, links to the Markdown and llms.txt artifacts | `/openapi.json` | M26 |
-| `/settings` | runtime + feature summary, admin token entry | `/api/status`, `/api/whoami` | M8 |
+| `/settings` | runtime + feature summary, plus **Tokens & access**: the resolved identity (token role or scoped virtual key) and the one place to change the stored credential | `/api/status`, `/api/whoami` | M8, M27 |
 
 ## Project structure
 
