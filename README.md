@@ -87,8 +87,9 @@ cargo run -p kgateway-server -- --config config.json
 # → kgateway listening on 0.0.0.0:8080
 ```
 
-(Or let `./scripts/start.sh` generate a config from whatever keys are in your env and start
-the server in one step.)
+(Or let `./scripts/start.sh` generate a config from whatever keys are in your env, ask
+whether to start the dashboard alongside, and run everything in one step —
+`KGATEWAY_START_UI=1|0` answers the prompt non-interactively.)
 
 ### Send your first request
 

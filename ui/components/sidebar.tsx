@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { OrnamentDivider } from "@/components/baroque/ornament-divider";
 import { useTheme } from "@/components/baroque/use-theme";
+import { GitHubStarButton } from "@/components/github-star-button";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -80,9 +81,10 @@ export function Sidebar() {
           </Link>
         );
       })}
-      {/* Theme switch: Midnight (dark) ⇄ Porcelain (light) */}
+      {/* Repo star link + theme switch: Midnight (dark) ⇄ Porcelain (light) */}
       <div className="mt-auto">
         <OrnamentDivider className="mb-2 px-1" />
+        <GitHubStarButton />
         <button
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"

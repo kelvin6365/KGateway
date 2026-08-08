@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-repository = "https://github.com/kelvinkwong/kgateway"
+repository = "https://github.com/kelvin6365/KGateway"
 rust-version = "1.88"
 
 [workspace.dependencies]
