@@ -8,6 +8,18 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Honest startup banner + start.sh dashboard prompt.** `./scripts/start.sh` now asks
+  "start the dashboard too?" (default yes; `KGATEWAY_START_UI=1|0` answers it
+  non-interactively, no-TTY defaults to no) and, on yes, installs/starts the Next.js UI
+  alongside the gateway and stops it with Ctrl-C. The server banner no longer prints a
+  hardcoded `http://<host>:3000` Dashboard URL when nothing is serving it: the URL shows
+  only when the starter passes `KGATEWAY_DASHBOARD_URL`; otherwise the row reads
+  "not running" with the command to start it.
+
+- **"Star on GitHub" in the dashboard sidebar.** A repo link with a live star count
+  (unauthenticated GitHub API, cached an hour, silently omitted when unavailable). Also
+  fixed the stale `repository` URL in `Cargo.toml`.
+
 - **Per-virtual-key data scoping + a clear access model.** Virtual keys can now sign in to
   the read APIs: `Authorization: Bearer <key-id>` on `/api/logs*`, `/api/sessions*`,
   `/api/whoami` and the SSE tail authenticates, with every response **force-scoped

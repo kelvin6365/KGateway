@@ -73,8 +73,18 @@ fn storage_kind(database: &Option<String>) -> &'static str {
 /// Render the startup banner to stdout. `addr` is the bound listen address
 /// (e.g. `0.0.0.0:8080`).
 pub fn print(config: &Config, addr: &str) {
+    // The dashboard is a separate Next.js process the server can't see. Whoever starts
+    // it (scripts/start.sh, an operator) sets KGATEWAY_DASHBOARD_URL; absent, the banner
+    // shows how to start it instead of a URL that isn't serving anything.
+    let dashboard_url = std::env::var("KGATEWAY_DASHBOARD_URL").ok();
     let mut out = String::new();
-    render(config, addr, &Palette::resolve(), &mut out);
+    render(
+        config,
+        addr,
+        dashboard_url.as_deref(),
+        &Palette::resolve(),
+        &mut out,
+    );
     // A single write keeps the banner from interleaving with early log lines.
     print!("{out}");
     use std::io::Write;
@@ -82,8 +92,9 @@ pub fn print(config: &Config, addr: &str) {
 }
 
 /// Build the banner text into `out`. Separated from `print` so it is unit-testable
-/// with a colourless palette.
-fn render(config: &Config, addr: &str, p: &Palette, out: &mut String) {
+/// with a colourless palette. `dashboard_url` is Some only when a dashboard is
+/// actually running (see `print`).
+fn render(config: &Config, addr: &str, dashboard_url: Option<&str>, p: &Palette, out: &mut String) {
     use std::fmt::Write;
 
     let version = env!("CARGO_PKG_VERSION");
@@ -160,19 +171,17 @@ fn render(config: &Config, addr: &str, p: &Palette, out: &mut String) {
         p.accent,
         &format!("http://{display_host}"),
     );
-    // Dashboard is a separate Next.js app (ui/), served on port 3000 in dev — not the
-    // backend port. It talks to the gateway via NEXT_PUBLIC_KGATEWAY_URL.
-    let dashboard_host = display_host
-        .split(':')
-        .next()
-        .unwrap_or("localhost")
-        .to_owned();
-    row(
-        out,
-        "Dashboard",
-        p.accent,
-        &format!("http://{dashboard_host}:3000"),
-    );
+    // Dashboard is a separate Next.js app (ui/); only print a URL when one is actually
+    // running — a hardcoded :3000 link with nothing behind it just misleads.
+    match dashboard_url {
+        Some(url) => row(out, "Dashboard", p.accent, url),
+        None => row(
+            out,
+            "Dashboard",
+            p.dim,
+            "not running — start: cd ui && pnpm dev  (or ./scripts/start.sh)",
+        ),
+    }
     row(
         out,
         "Providers",
@@ -219,23 +228,45 @@ mod tests {
             },
         );
         let mut out = String::new();
-        render(&cfg, "0.0.0.0:8080", &plain(), &mut out);
+        render(&cfg, "0.0.0.0:8080", None, &plain(), &mut out);
 
         assert!(out.contains("KGATEWAY") || out.contains("██"));
         assert!(out.contains(env!("CARGO_PKG_VERSION")));
         assert!(out.contains("http://localhost:8080"));
-        // Dashboard is a separate Next.js app on port 3000, not the backend port.
-        assert!(out.contains("http://localhost:3000"));
         assert!(out.contains("Providers"));
         // One provider registered.
         assert!(out.contains("Providers    1") || out.contains("Providers"));
     }
 
     #[test]
+    fn dashboard_row_shows_url_only_when_running() {
+        let cfg = Config::default();
+
+        // A dashboard was started (env var set by scripts/start.sh): print its URL.
+        let mut with = String::new();
+        render(
+            &cfg,
+            "0.0.0.0:8080",
+            Some("http://localhost:3000"),
+            &plain(),
+            &mut with,
+        );
+        assert!(with.contains("http://localhost:3000"));
+        assert!(!with.contains("not running"));
+
+        // No dashboard: a how-to-start hint, never a URL to a dead port.
+        let mut without = String::new();
+        render(&cfg, "0.0.0.0:8080", None, &plain(), &mut without);
+        assert!(without.contains("Dashboard"));
+        assert!(without.contains("not running"));
+        assert!(!without.contains(":3000"));
+    }
+
+    #[test]
     fn reports_open_admin_when_unset() {
         let cfg = Config::default();
         let mut out = String::new();
-        render(&cfg, "0.0.0.0:8080", &plain(), &mut out);
+        render(&cfg, "0.0.0.0:8080", None, &plain(), &mut out);
         assert!(out.contains("open (no admin_token)"));
     }
 
@@ -246,7 +277,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = String::new();
-        render(&cfg, "0.0.0.0:8080", &plain(), &mut out);
+        render(&cfg, "0.0.0.0:8080", None, &plain(), &mut out);
         assert!(out.contains("protected"));
         // Never echo the token itself.
         assert!(!out.contains("secret"));
