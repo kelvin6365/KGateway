@@ -204,7 +204,10 @@ impl Provider for ReplicateProvider {
         key: &ApiKey,
         req: ChatRequest,
     ) -> Result<ChatResponse, KgError> {
-        let model = req.model.clone();
+        // The engine passes the FULL routed model (`replicate/owner/name`);
+        // `model_id()` strips only the leading provider segment, which is exactly
+        // right here because Replicate slugs are themselves `owner/name`.
+        let model = req.model_id().to_string();
         let mut body = serde_json::json!({ "input": build_input(&req) });
         if model_route(&model) == ModelRoute::Version {
             body["version"] = serde_json::Value::String(model.clone());
@@ -296,7 +299,7 @@ impl Provider for ReplicateProvider {
         key: &ApiKey,
         req: ChatRequest,
     ) -> Result<ChunkStream, KgError> {
-        let model = req.model.clone();
+        let model = req.model_id().to_string();
         let mut body = serde_json::json!({ "input": build_input(&req), "stream": true });
         if model_route(&model) == ModelRoute::Version {
             body["version"] = serde_json::Value::String(model.clone());
@@ -502,6 +505,40 @@ mod tests {
         assert_eq!(p.output_text(), "");
     }
 
+    /// Regression: the engine hands the provider the FULL routed model
+    /// (`dispatch_one` sets `attempt_req.model = "replicate/owner/name"`), so the
+    /// connector must strip the prefix with `model_id()`. Using `req.model`
+    /// verbatim 404s on every routed call — invisible to any test that passes an
+    /// unprefixed model.
+    #[tokio::test]
+    async fn chat_strips_the_provider_prefix_from_the_routed_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/models/meta/llama-2-70b-chat/predictions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "pred-p",
+                "status": "succeeded",
+                "output": "ok"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = ReplicateProvider::with_base_url(server.uri());
+        let out = p
+            .chat(
+                &Ctx::new(),
+                &test_key(),
+                // Exactly what dispatch_one passes down.
+                req("replicate/meta/llama-2-70b-chat"),
+            )
+            .await
+            .expect("a routed model must reach /v1/models/{owner}/{name}/predictions");
+
+        // The echoed model must be the bare id too, not the routed string.
+        assert_eq!(out.model, "meta/llama-2-70b-chat");
+    }
+
     #[tokio::test]
     async fn chat_slug_model_posts_to_model_route_and_waits() {
         let server = MockServer::start().await;
@@ -523,7 +560,12 @@ mod tests {
 
         let p = ReplicateProvider::with_base_url(server.uri());
         let out = p
-            .chat(&Ctx::new(), &test_key(), req("meta/llama-2-70b-chat"))
+            // Routed form, as `dispatch_one` builds it.
+            .chat(
+                &Ctx::new(),
+                &test_key(),
+                req("replicate/meta/llama-2-70b-chat"),
+            )
             .await
             .expect("chat should succeed");
 
@@ -551,7 +593,11 @@ mod tests {
 
         let p = ReplicateProvider::with_base_url(server.uri());
         let out = p
-            .chat(&Ctx::new(), &test_key(), req(VERSION_ID))
+            .chat(
+                &Ctx::new(),
+                &test_key(),
+                req(&format!("replicate/{VERSION_ID}")),
+            )
             .await
             .expect("version-id chat should succeed");
         assert_eq!(out.choices[0].message.text_content(), Some("ok"));
@@ -572,7 +618,7 @@ mod tests {
 
         let p = ReplicateProvider::with_base_url(server.uri());
         let err = p
-            .chat(&Ctx::new(), &test_key(), req("a/b"))
+            .chat(&Ctx::new(), &test_key(), req("replicate/a/b"))
             .await
             .expect_err("a failed prediction must surface as an error");
 
@@ -597,7 +643,7 @@ mod tests {
 
         let p = ReplicateProvider::with_base_url(server.uri());
         let err = p
-            .chat(&Ctx::new(), &test_key(), req("a/b"))
+            .chat(&Ctx::new(), &test_key(), req("replicate/a/b"))
             .await
             .expect_err("429 should map to an error");
         assert!(err.is_retryable(), "429 must be retryable");

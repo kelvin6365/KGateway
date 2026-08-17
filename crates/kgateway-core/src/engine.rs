@@ -903,7 +903,13 @@ impl Kgateway {
     ///
     /// `handle` is `provider/keyid:rawid` as returned by [`Self::video_generate`];
     /// a bare `provider/rawid` is also accepted and selects any key.
-    pub async fn video_retrieve(&self, ctx: &Ctx, handle: &str) -> Result<VideoResponse, KgError> {
+    /// Takes `&mut Ctx` so it can set [`Ctx::job_poll`] itself — leaving that to the
+    /// caller would make a governance bypass depend on every transport remembering.
+    pub async fn video_retrieve(
+        &self,
+        ctx: &mut Ctx,
+        handle: &str,
+    ) -> Result<VideoResponse, KgError> {
         let (provider_name, rest) = handle.split_once('/').ok_or_else(|| {
             KgError::new(KgErrorKind::BadRequest, "video id must be `provider/<id>`")
         })?;
@@ -918,8 +924,12 @@ impl Kgateway {
             ));
         }
         // Observed like every other capability: a poll is a real upstream call and
-        // must count against a virtual key's budget, or it becomes a bypass.
+        // must count against a virtual key's budget, or it becomes a bypass. The
+        // `job_poll` marker tells governance to skip the model allow/deny lists,
+        // which cannot apply to a handle that names a job rather than a model.
         let model_full = format!("{provider_name}/video");
+        ctx.job_poll = true;
+        let ctx = &*ctx;
         if let Err(e) = self.observe_check(ctx, &model_full).await {
             self.observe_record(ctx, cap_record(&model_full, e.http_status(), 0, 0))
                 .await;
@@ -3214,9 +3224,9 @@ mod tests {
     #[tokio::test]
     async fn video_retrieve_rejects_a_handle_without_a_provider_segment() {
         let engine = Kgateway::new(registry_with_ok_provider());
-        let ctx = Ctx::new();
+        let mut ctx = Ctx::new();
         let err = engine
-            .video_retrieve(&ctx, "no-slash-here")
+            .video_retrieve(&mut ctx, "no-slash-here")
             .await
             .expect_err("a bare id cannot be routed");
         assert_eq!(err.kind, KgErrorKind::BadRequest);
@@ -3226,9 +3236,9 @@ mod tests {
     #[tokio::test]
     async fn video_retrieve_rejects_a_handle_with_an_empty_job_id() {
         let engine = Kgateway::new(registry_with_ok_provider());
-        let ctx = Ctx::new();
+        let mut ctx = Ctx::new();
         let err = engine
-            .video_retrieve(&ctx, "openai/keyid:")
+            .video_retrieve(&mut ctx, "openai/keyid:")
             .await
             .expect_err("an empty upstream id cannot be polled");
         assert_eq!(err.kind, KgErrorKind::BadRequest);

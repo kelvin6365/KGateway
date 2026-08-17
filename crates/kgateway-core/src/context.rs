@@ -46,6 +46,16 @@ pub struct Ctx {
     /// a diagnostic label only — never forwarded upstream.
     pub user_agent: Option<String>,
     pub attempt: u32,
+    /// True when this call POLLS an already-submitted asynchronous job rather than
+    /// invoking a model (today: `GET /v1/videos/{provider}/{id}`).
+    ///
+    /// A poll carries no model id — the handle names a job, not a model — so the
+    /// governance model allow/deny lists cannot apply to it and are skipped. Every
+    /// other control still runs: the key must exist and be valid, and the poll
+    /// counts against rate limits and budgets. Without this, a virtual key with an
+    /// `allowed_models` list could submit a video job (202) and then be rejected on
+    /// every poll, stranding work it had already paid for.
+    pub job_poll: bool,
     pub started_at: Instant,
     /// Trace spans for this request's waterfall. Behind a mutex because most of
     /// the pipeline holds `&Ctx`, not `&mut Ctx`; behind an `Arc` because a
@@ -62,6 +72,7 @@ impl Ctx {
             virtual_key: None,
             session_id: None,
             user_agent: None,
+            job_poll: false,
             attempt: 0,
             started_at: Instant::now(),
             spans: Arc::new(SpanCollector::new()),

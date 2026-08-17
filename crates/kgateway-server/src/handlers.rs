@@ -1363,7 +1363,12 @@ pub async fn videos_retrieve(
     ctx.user_agent = user_agent_from(&headers);
     crate::otel::apply_trace_context(&mut ctx, &headers);
     let handle = format!("{provider}/{id}");
-    match state.engine.load_full().video_retrieve(&ctx, &handle).await {
+    match state
+        .engine
+        .load_full()
+        .video_retrieve(&mut ctx, &handle)
+        .await
+    {
         Ok(resp) => {
             let mut r = Json(&resp).into_response();
             // Only advertise a retry cadence while the job can still change.

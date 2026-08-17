@@ -98,6 +98,25 @@ struct ElevenLabsTranscription {
     text: String,
 }
 
+/// Percent-encode a single URL path segment.
+///
+/// The voice id comes straight from the client's request body, so without this a
+/// value like `../voices` would resolve to a different ElevenLabs endpoint under
+/// the operator's key, and a `?` or `#` would rewrite or truncate the query.
+/// Encodes everything outside the RFC 3986 unreserved set.
+pub(crate) fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Map the gateway's short format names onto ElevenLabs `output_format` tokens.
 /// ElevenLabs wants a codec+rate+bitrate triple; passing a bare `"mp3"` is a 422.
 fn output_format(format: Option<&str>) -> &'static str {
@@ -138,7 +157,9 @@ impl Audio for ElevenLabsProvider {
         let fmt = output_format(req.format.as_deref());
         let url = format!(
             "{}/v1/text-to-speech/{}?output_format={}",
-            self.base_url, voice, fmt
+            self.base_url,
+            encode_path_segment(voice),
+            fmt
         );
         let body = serde_json::json!({
             "text": req.input,
@@ -326,6 +347,52 @@ mod tests {
             .await
             .expect("blank voice should fall back, not fail");
         assert_eq!(out.audio, vec![1, 2]);
+    }
+
+    /// Regression: `voice` comes straight from the client body. Unencoded, a value
+    /// like `../voices` resolves to a different ElevenLabs endpoint under the
+    /// operator's key, and `?`/`#` rewrite or truncate the query.
+    #[test]
+    fn voice_is_percent_encoded_into_the_path() {
+        assert_eq!(encode_path_segment("../voices"), "..%2Fvoices");
+        assert_eq!(encode_path_segment("a?b#c"), "a%3Fb%23c");
+        assert_eq!(encode_path_segment("with space"), "with%20space");
+        // Unreserved characters must pass through untouched, or every real voice
+        // id would be mangled.
+        assert_eq!(
+            encode_path_segment("21m00Tcm4TlvDq8ikWAM"),
+            "21m00Tcm4TlvDq8ikWAM"
+        );
+        assert_eq!(encode_path_segment("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[tokio::test]
+    async fn traversal_in_voice_cannot_escape_the_tts_path() {
+        let server = MockServer::start().await;
+        // The escaped segment must stay one segment: no `/voices` route is mounted,
+        // so an escape would 404 here instead of matching.
+        Mock::given(method("POST"))
+            .and(path("/v1/text-to-speech/..%2Fvoices"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7]))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = ElevenLabsProvider::with_base_url(server.uri());
+        let out = p
+            .speech(
+                &Ctx::new(),
+                &test_key(),
+                SpeechRequest {
+                    model: "eleven_turbo_v2_5".into(),
+                    input: "x".into(),
+                    voice: "../voices".into(),
+                    format: None,
+                },
+            )
+            .await
+            .expect("the encoded segment should still be a valid request");
+        assert_eq!(out.audio, vec![7]);
     }
 
     #[tokio::test]

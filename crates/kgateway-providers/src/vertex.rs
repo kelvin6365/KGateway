@@ -33,6 +33,7 @@
 //!
 //! **Verification status: mock-only.**
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -117,15 +118,32 @@ pub(crate) fn vertex_host(location: &str) -> String {
 /// Split the configured `base_url` into `(project, location)`, or recognise an
 /// explicit endpoint override.
 pub(crate) fn parse_target(base_url: &str) -> (Option<String>, String, String) {
-    if base_url.starts_with("http") {
-        // Endpoint override: `http://host[:port]` optionally followed by
-        // `/project/location`.
-        let trimmed = base_url.trim_end_matches('/');
-        return (
-            Some(trimmed.to_string()),
-            "test-project".to_string(),
-            DEFAULT_LOCATION.to_string(),
-        );
+    if let Some(rest) = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+    {
+        // Endpoint override: `scheme://host[:port]` optionally followed by
+        // `/project/location`. The scheme is preserved on the endpoint; anything
+        // after the authority is the project/location pair.
+        let scheme = if base_url.starts_with("https://") {
+            "https://"
+        } else {
+            "http://"
+        };
+        let rest = rest.trim_end_matches('/');
+        let (authority, tail) = match rest.split_once('/') {
+            Some((a, t)) => (a, t),
+            None => (rest, ""),
+        };
+        let (project, location) = match tail.split_once('/') {
+            Some((p, l)) if !l.is_empty() => (p.to_string(), l.to_string()),
+            // No project/location given — leave the project EMPTY rather than
+            // inventing one. A bogus id would silently build a valid-looking path
+            // that always 404s; an empty one is visible in the URL immediately.
+            _ if tail.is_empty() => (String::new(), DEFAULT_LOCATION.to_string()),
+            _ => (tail.to_string(), DEFAULT_LOCATION.to_string()),
+        };
+        return (Some(format!("{scheme}{authority}")), project, location);
     }
     match base_url.split_once('/') {
         Some((project, location)) if !location.is_empty() => (
@@ -157,7 +175,14 @@ pub struct VertexProvider {
     project: String,
     location: String,
     client: reqwest::Client,
-    token: Arc<RwLock<Option<CachedToken>>>,
+    /// OAuth tokens cached **per credential**, keyed by `ApiKey::id`.
+    ///
+    /// A single shared slot would be wrong twice over: with two keys configured
+    /// (say two service accounts, or one SA plus `adc`) a request dispatched under
+    /// key B would reuse key A's token and authenticate as the wrong principal;
+    /// and after a 401 the engine rotates to a sibling key, which would then be
+    /// handed the same revoked token and fail identically.
+    tokens: Arc<RwLock<HashMap<String, CachedToken>>>,
 }
 
 impl VertexProvider {
@@ -177,7 +202,7 @@ impl VertexProvider {
             project,
             location,
             client: crate::http::default_client(),
-            token: Arc::new(RwLock::new(None)),
+            tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -203,7 +228,7 @@ impl VertexProvider {
 
     /// Resolve an OAuth2 access token, using the cache when it is still fresh.
     async fn access_token(&self, key: &ApiKey) -> Result<String, KgError> {
-        if let Some(t) = self.token.read().await.as_ref() {
+        if let Some(t) = self.tokens.read().await.get(&key.id) {
             if t.is_fresh() {
                 return Ok(t.value.clone());
             }
@@ -233,7 +258,10 @@ impl VertexProvider {
             }
         };
 
-        *self.token.write().await = Some(fetched.clone());
+        self.tokens
+            .write()
+            .await
+            .insert(key.id.clone(), fetched.clone());
         Ok(fetched.value)
     }
 
@@ -497,8 +525,34 @@ impl Provider for VertexProvider {
     }
 }
 
+/// Strip a `key=<secret>` query parameter out of a string.
+///
+/// `reqwest::Error`'s `Display` appends `" for url (...)"` verbatim, and in
+/// API-key mode that URL carries the Google API key. That text becomes
+/// `KgError::message`, which the engine copies into `CallRecord::error_message`
+/// and the logging observer **persists** — so without this the credential lands
+/// in the log store and is served by `GET /api/logs/{id}`.
+pub(crate) fn redact_key_param(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("key=") {
+        // Only treat it as the query parameter, not a substring of another word.
+        let is_param = i == 0 || matches!(rest.as_bytes()[i - 1], b'?' | b'&');
+        out.push_str(&rest[..i + 4]);
+        rest = &rest[i + 4..];
+        if !is_param {
+            continue;
+        }
+        let end = rest.find(['&', ')', ' ', '"', '\'']).unwrap_or(rest.len());
+        out.push_str("<redacted>");
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn net_err(e: reqwest::Error) -> KgError {
-    KgError::new(KgErrorKind::Network, e.to_string()).with_retryable(true)
+    KgError::new(KgErrorKind::Network, redact_key_param(&e.to_string())).with_retryable(true)
 }
 
 #[cfg(test)]
@@ -705,7 +759,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let p = VertexProvider::with_base_url(server.uri());
+        // Endpoint override plus the documented `/project/location` suffix.
+        let p = VertexProvider::with_base_url(format!("{}/test-project/us-central1", server.uri()));
         let out = p
             .chat(&Ctx::new(), &api_key(), req("gemini-2.5-pro"))
             .await
@@ -739,7 +794,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let p = VertexProvider::with_base_url(server.uri());
+        let p = VertexProvider::with_base_url(format!("{}/proj/us-central1", server.uri()));
         let err = p
             .chat(&Ctx::new(), &api_key(), req("gemini-2.5-pro"))
             .await
@@ -747,6 +802,82 @@ mod tests {
         assert!(err.is_retryable());
         assert_eq!(err.status, Some(429));
         assert_eq!(err.provider.as_deref(), Some("vertex"));
+    }
+
+    /// Regression: the token cache must be keyed per credential. A single shared
+    /// slot would hand key B the token minted for key A — authenticating as the
+    /// wrong principal — and would defeat key rotation, since after a 401 the
+    /// engine picks a sibling key and would get the same revoked token back.
+    #[tokio::test]
+    async fn token_cache_is_scoped_per_key() {
+        let p = VertexProvider::with_base_url("proj/us-central1");
+        let a = CachedToken {
+            value: "token-A".into(),
+            expires_at: SystemTime::now() + Duration::from_secs(3600),
+        };
+        let b = CachedToken {
+            value: "token-B".into(),
+            expires_at: SystemTime::now() + Duration::from_secs(3600),
+        };
+        {
+            let mut w = p.tokens.write().await;
+            w.insert("key-a".to_string(), a);
+            w.insert("key-b".to_string(), b);
+        }
+        let r = p.tokens.read().await;
+        assert_eq!(r.get("key-a").map(|t| t.value.as_str()), Some("token-A"));
+        assert_eq!(r.get("key-b").map(|t| t.value.as_str()), Some("token-B"));
+        // A third key must miss rather than inherit either token.
+        assert!(r.get("key-c").is_none());
+    }
+
+    /// Regression: `reqwest::Error`'s Display appends " for url (...)", which in
+    /// API-key mode carries the credential. That text becomes `KgError::message`
+    /// and IS persisted to the audit log, so it must be redacted first.
+    #[test]
+    fn network_errors_never_carry_the_api_key() {
+        let raw = "error sending request for url \
+(https://x-aiplatform.googleapis.com/v1/projects/p/locations/l/publishers/google/\
+models/m:generateContent?key=AIzaSyREALSECRET)";
+        let out = redact_key_param(raw);
+        assert!(
+            !out.contains("AIzaSyREALSECRET"),
+            "the API key must not survive redaction: {out}"
+        );
+        assert!(out.contains("key=<redacted>"), "got {out}");
+        // The rest of the message must survive so the error stays diagnosable.
+        assert!(out.contains("generateContent"));
+    }
+
+    #[test]
+    fn redaction_only_touches_the_key_query_parameter() {
+        // `monkey=` ends in "key=" but is not the parameter; leave it alone.
+        let s = redact_key_param("https://h/p?monkey=banana&key=SECRET&x=1");
+        assert!(s.contains("monkey=banana"), "got {s}");
+        assert!(s.contains("key=<redacted>"), "got {s}");
+        assert!(s.contains("x=1"), "trailing params must survive: {s}");
+        assert!(!s.contains("SECRET"));
+        // Nothing to redact -> unchanged.
+        assert_eq!(redact_key_param("no secrets here"), "no secrets here");
+    }
+
+    /// Regression: an endpoint override must not invent a project id. A fabricated
+    /// one builds a valid-looking path that always 404s with nothing to point at.
+    #[test]
+    fn endpoint_override_does_not_fabricate_a_project() {
+        let (ep, project, location) = parse_target("http://127.0.0.1:9");
+        assert_eq!(ep.as_deref(), Some("http://127.0.0.1:9"));
+        assert!(
+            project.is_empty(),
+            "a bare endpoint has no project; got {project:?}"
+        );
+        assert_eq!(location, DEFAULT_LOCATION);
+
+        // The documented `host/project/location` form must actually be honoured.
+        let (ep, project, location) = parse_target("https://vertex.internal/my-proj/us-central1");
+        assert_eq!(ep.as_deref(), Some("https://vertex.internal"));
+        assert_eq!(project, "my-proj");
+        assert_eq!(location, "us-central1");
     }
 
     #[tokio::test]

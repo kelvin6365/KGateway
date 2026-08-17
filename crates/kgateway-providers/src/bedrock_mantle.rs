@@ -130,6 +130,16 @@ impl BedrockMantleProvider {
         }
     }
 
+    /// Clone the parts needed to issue a request. Cheap: `reqwest::Client` is an
+    /// `Arc` internally, so this shares the connection pool rather than rebuilding it.
+    fn clone_shallow(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            region: self.region.clone(),
+            client: self.client.clone(),
+        }
+    }
+
     /// Base URL for this provider. A configured value starting with `http` is an
     /// explicit endpoint override; otherwise the region names the regional host.
     fn base_url(&self) -> String {
@@ -238,13 +248,30 @@ impl Provider for BedrockMantleProvider {
         key: &ApiKey,
         mut req: ChatRequest,
     ) -> Result<ChatResponse, KgError> {
-        let (region_override, bare) = split_region_prefix(&req.model);
+        // `req.model` is the FULL routed string (`bedrock_mantle/[region/]model`),
+        // so strip the provider segment first — otherwise the region test below
+        // sees the provider name and never fires.
+        let (region_override, bare) = split_region_prefix(req.model_id());
         let model = bare.to_string();
-        if region_override.is_some() {
-            // The region selector is a routing hint, never sent upstream.
-            req.model = model.clone();
-        }
+        // Take ownership before rewriting `req.model`, which the borrow above reads.
+        let region_override = region_override.map(str::to_string);
+        // The region selector is a routing hint and must never reach upstream, so
+        // rewrite the request to the bare id in both cases.
+        req.model = model.clone();
         let surface = model_surface(&model);
+
+        // An explicit `region/` prefix overrides the configured region for this
+        // call — host and SigV4 credential scope both have to follow it, or the
+        // request is signed for the wrong region.
+        //
+        // An operator-pinned endpoint (a VPC endpoint, or a test server) always
+        // wins: a per-request hint must not be able to redirect traffic off it.
+        let routed = match region_override {
+            Some(r) if !self.region.starts_with("http") => {
+                Self::with_identity(self.key.as_str(), r)
+            }
+            _ => Self::clone_shallow(self),
+        };
 
         match surface {
             ModelSurface::Anthropic => {
@@ -254,7 +281,7 @@ impl Provider for BedrockMantleProvider {
                 let body = serde_json::to_vec(&mapper.body(&req, false)).map_err(|e| {
                     KgError::new(KgErrorKind::Internal, format!("request encode error: {e}"))
                 })?;
-                let rb = self
+                let rb = routed
                     .signed_request(key, surface.path(), body)?
                     // Header, not a body field — this is the Mantle difference.
                     .header("anthropic-version", ANTHROPIC_VERSION);
@@ -271,7 +298,7 @@ impl Provider for BedrockMantleProvider {
                 let body = serde_json::to_vec(&mapper.body(&req, false)?).map_err(|e| {
                     KgError::new(KgErrorKind::Internal, format!("request encode error: {e}"))
                 })?;
-                let rb = self.signed_request(key, surface.path(), body)?;
+                let rb = routed.signed_request(key, surface.path(), body)?;
                 let resp = self
                     .fail_on_status(rb.send().await.map_err(net_err)?)
                     .await?;
@@ -553,6 +580,74 @@ mod tests {
             .await
             .expect_err("a blank key must fail fast, not send an unauthenticated call");
         assert_eq!(err.kind, KgErrorKind::Auth);
+    }
+
+    /// Regression: the engine passes the FULL routed model, so the region test must
+    /// run against `model_id()`. Against `req.model` the first segment is the
+    /// provider name, the prefix never fires, and `us-west-2/claude-x` is sent
+    /// upstream as the model id.
+    #[tokio::test]
+    async fn region_prefix_is_stripped_from_the_model_sent_upstream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            // The region must NOT survive into the model id.
+            .and(body_partial_json(serde_json::json!({
+                "model": "claude-sonnet-4-5"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg_1",
+                "model": "claude-sonnet-4-5",
+                "content": [{ "type": "text", "text": "ok" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = BedrockMantleProvider::with_region(server.uri());
+        let out = p
+            .chat(
+                &Ctx::new(),
+                &bearer_key(),
+                // Exactly what dispatch_one passes down.
+                req("bedrock_mantle/us-west-2/claude-sonnet-4-5"),
+            )
+            .await
+            .expect("a region-prefixed routed model must resolve");
+        assert_eq!(out.choices[0].message.text_content(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn routed_model_without_a_region_still_reaches_the_right_surface() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "claude-sonnet-4-5"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg_2",
+                "model": "claude-sonnet-4-5",
+                "content": [{ "type": "text", "text": "ok" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = BedrockMantleProvider::with_region(server.uri());
+        let out = p
+            .chat(
+                &Ctx::new(),
+                &bearer_key(),
+                req("bedrock_mantle/claude-sonnet-4-5"),
+            )
+            .await
+            .expect("the common case must keep working");
+        assert_eq!(out.choices[0].message.text_content(), Some("ok"));
     }
 
     #[tokio::test]

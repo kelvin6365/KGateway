@@ -64,12 +64,15 @@ impl RunwareProvider {
         }
     }
 
-    /// POST a one-task array to the bare base URL and return the first result.
-    async fn send_task(
+    /// POST a one-task array to the bare base URL and return **every** result.
+    ///
+    /// Returning only the first would silently drop renders the caller was billed
+    /// for when `numberResults > 1`.
+    async fn send_task_all(
         &self,
         key: &ApiKey,
         task: serde_json::Value,
-    ) -> Result<TaskResult, KgError> {
+    ) -> Result<Vec<TaskResult>, KgError> {
         let resp = self
             .client
             // No path is appended — that is the protocol, not an oversight.
@@ -102,12 +105,22 @@ impl RunwareProvider {
             return Err(KgError::provider(detail, 502).with_provider(self.key.as_str()));
         }
 
-        envelope.data.into_iter().next().ok_or_else(|| {
-            KgError::new(
+        if envelope.data.is_empty() {
+            return Err(KgError::new(
                 KgErrorKind::Internal,
                 "runware returned an empty task-result array",
-            )
-        })
+            ));
+        }
+        Ok(envelope.data)
+    }
+
+    /// Single-result convenience for the video paths, which always submit one task.
+    async fn send_task(
+        &self,
+        key: &ApiKey,
+        task: serde_json::Value,
+    ) -> Result<TaskResult, KgError> {
+        self.send_task_all(key, task).await.map(|mut v| v.remove(0))
     }
 
     async fn poll_task(&self, key: &ApiKey, task_uuid: &str) -> Result<TaskResult, KgError> {
@@ -255,25 +268,32 @@ impl Images for RunwareProvider {
             task["height"] = serde_json::Value::from(h);
         }
 
-        let mut result = self.send_task(key, task).await?;
+        let mut results = self.send_task_all(key, task).await?;
 
         // Bounded poll: image tasks usually complete inline, so this is normally
         // zero round-trips. It holds a provider semaphore permit while it runs.
         let deadline = tokio::time::Instant::now() + MAX_IMAGE_POLL;
         loop {
-            let has_output = result.image_url.is_some() || result.image_base64.is_some();
-            match map_status(result.status.as_deref(), has_output) {
+            // Status is reported per task, and Runware settles a `numberResults`
+            // batch together, so the first result speaks for the batch.
+            let head = &results[0];
+            let has_output = head.image_url.is_some() || head.image_base64.is_some();
+            match map_status(head.status.as_deref(), has_output) {
                 VideoStatus::Succeeded => {
                     return Ok(ImageResponse {
-                        data: vec![ImageData {
-                            url: result.image_url,
-                            b64_json: result.image_base64,
-                        }],
-                    })
+                        // Every render the caller was billed for, not just the first.
+                        data: results
+                            .into_iter()
+                            .map(|r| ImageData {
+                                url: r.image_url,
+                                b64_json: r.image_base64,
+                            })
+                            .collect(),
+                    });
                 }
                 VideoStatus::Failed | VideoStatus::Cancelled => {
                     return Err(KgError::provider(
-                        format!("runware image task {} did not succeed", result.task_uuid),
+                        format!("runware image task {} did not succeed", head.task_uuid),
                         502,
                     )
                     .with_provider(self.key.as_str()))
@@ -284,7 +304,7 @@ impl Images for RunwareProvider {
                 return Err(KgError::provider(
                     format!(
                         "runware image task {} did not settle within {}s",
-                        result.task_uuid,
+                        results[0].task_uuid,
                         MAX_IMAGE_POLL.as_secs()
                     ),
                     504,
@@ -292,7 +312,12 @@ impl Images for RunwareProvider {
                 .with_provider(self.key.as_str()));
             }
             tokio::time::sleep(IMAGE_POLL_INTERVAL).await;
-            result = self.poll_task(key, &task_uuid).await?;
+            results = self
+                .send_task_all(
+                    key,
+                    serde_json::json!({ "taskType": "getResponse", "taskUUID": task_uuid }),
+                )
+                .await?;
         }
     }
 }
@@ -575,6 +600,47 @@ mod tests {
             .expect("inline image result should resolve with no poll");
 
         assert_eq!(out.data[0].url.as_deref(), Some("https://cdn.test/pic.png"));
+    }
+
+    /// Regression: `numberResults` bills for `n` renders, so returning only the
+    /// first silently drops output the caller paid for.
+    #[tokio::test]
+    async fn image_generate_returns_every_requested_render() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(serde_json::json!([{
+                "taskType": "imageInference",
+                "numberResults": 3,
+            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "taskUUID": "i1", "imageURL": "https://cdn.test/1.png" },
+                    { "taskUUID": "i2", "imageURL": "https://cdn.test/2.png" },
+                    { "taskUUID": "i3", "imageURL": "https://cdn.test/3.png" }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = RunwareProvider::with_base_url(server.uri());
+        let out = p
+            .image_generate(
+                &Ctx::new(),
+                &test_key(),
+                ImageGenerationRequest {
+                    model: "runware:101@1".into(),
+                    prompt: "a bicycle".into(),
+                    n: Some(3),
+                    size: None,
+                },
+            )
+            .await
+            .expect("three renders were requested and billed");
+
+        assert_eq!(out.data.len(), 3, "every billed render must be returned");
+        assert_eq!(out.data[2].url.as_deref(), Some("https://cdn.test/3.png"));
     }
 
     #[tokio::test]

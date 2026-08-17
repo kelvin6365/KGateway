@@ -117,22 +117,28 @@ impl RequestObserver for GovernancePlugin {
 
         let bare = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
 
-        // Model deny-list — a match here ALWAYS rejects, winning over the allow-list.
-        if cfg.denied_models.iter().any(|m| m == model || m == bare) {
-            return Err(KgError::new(
-                KgErrorKind::BadRequest,
-                format!("model '{model}' is denied for this virtual key"),
-            ));
-        }
+        // Model allow/deny lists govern which models a key may INVOKE. A job poll
+        // invokes nothing — its handle names a job, not a model — so neither list
+        // can apply and both are skipped. Everything below (rate limits, token and
+        // cost budgets) still runs, so a poll is never a governance bypass.
+        if !ctx.job_poll {
+            // Model deny-list — a match here ALWAYS rejects, winning over the allow-list.
+            if cfg.denied_models.iter().any(|m| m == model || m == bare) {
+                return Err(KgError::new(
+                    KgErrorKind::BadRequest,
+                    format!("model '{model}' is denied for this virtual key"),
+                ));
+            }
 
-        // Model allow-list — match the full `provider/model` or the bare model id.
-        if !cfg.allowed_models.is_empty()
-            && !cfg.allowed_models.iter().any(|m| m == model || m == bare)
-        {
-            return Err(KgError::new(
-                KgErrorKind::BadRequest,
-                format!("model '{model}' is not allowed for this virtual key"),
-            ));
+            // Model allow-list — match the full `provider/model` or the bare model id.
+            if !cfg.allowed_models.is_empty()
+                && !cfg.allowed_models.iter().any(|m| m == model || m == bare)
+            {
+                return Err(KgError::new(
+                    KgErrorKind::BadRequest,
+                    format!("model '{model}' is not allowed for this virtual key"),
+                ));
+            }
         }
 
         // Fixed-window rate limit. Store errors fail OPEN (a counter-DB blip must not take
@@ -271,6 +277,63 @@ mod tests {
         assert_eq!(err.kind, KgErrorKind::BadRequest);
         // allowed model passes
         assert!(g.on_request(&ctx, "openai/gpt-4o").await.is_ok());
+    }
+
+    /// Regression: a video poll carries a synthetic `provider/video` model that can
+    /// never appear in an allow-list. Enforcing the list against it would let a key
+    /// submit a job (202) and then be rejected on every poll — stranding work it had
+    /// already paid for.
+    #[tokio::test]
+    async fn job_poll_bypasses_the_model_allow_list() {
+        let mut k = vkey("vk1");
+        k.allowed_models = vec!["runway/gen4_turbo".into()];
+        let g = GovernancePlugin::new(vec![k], true);
+
+        // Submitting the allowed model works, and the synthetic poll model does not
+        // match the list...
+        let ctx = ctx_with_key("vk1");
+        assert!(g.on_request(&ctx, "runway/gen4_turbo").await.is_ok());
+        assert!(
+            g.on_request(&ctx, "runway/video").await.is_err(),
+            "without the marker the allow-list must still reject it"
+        );
+
+        // ...but a poll marked as such is allowed through.
+        let mut poll = ctx_with_key("vk1");
+        poll.job_poll = true;
+        assert!(
+            g.on_request(&poll, "runway/video").await.is_ok(),
+            "a job poll must not be blocked by the model allow-list"
+        );
+    }
+
+    /// The marker must not become a general governance bypass: rate limits, budgets
+    /// and key validity all still apply to a poll.
+    #[tokio::test]
+    async fn job_poll_still_counts_against_rate_limits() {
+        let mut k = vkey("vk1");
+        k.max_requests_per_min = Some(2);
+        let g = GovernancePlugin::new(vec![k], true);
+        let mut poll = ctx_with_key("vk1");
+        poll.job_poll = true;
+
+        assert!(g.on_request(&poll, "runway/video").await.is_ok());
+        assert!(g.on_request(&poll, "runway/video").await.is_ok());
+        assert!(
+            g.on_request(&poll, "runway/video").await.is_err(),
+            "polls must be rate limited like any other call"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_key_is_rejected_even_for_a_job_poll() {
+        let g = GovernancePlugin::new(vec![vkey("vk1")], true);
+        let mut poll = ctx_with_key("nope");
+        poll.job_poll = true;
+        assert!(
+            g.on_request(&poll, "runway/video").await.is_err(),
+            "an unknown key must not be admitted by the poll path"
+        );
     }
 
     #[tokio::test]
