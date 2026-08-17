@@ -53,7 +53,7 @@ Dependency direction: `server → plugins/providers/store → core`. Nothing dep
 | Crate | Role |
 |---|---|
 | `kgateway-core` | The engine. Schemas, `Provider`/`LlmPlugin`/`RequestObserver` traits, routing + failover, streaming, plugin pipeline. **No HTTP dependency — embeddable.** |
-| `kgateway-providers` | Connectors: OpenAI, Anthropic, Cohere, Bedrock, Gemini, Azure + the `openai_compat` factory (19 OpenAI-wire-compatible vendors, incl. z.ai GLM, Moonshot, MiniMax). |
+| `kgateway-providers` | Connectors: OpenAI, Anthropic, Cohere, Bedrock, Bedrock Mantle, Gemini, Vertex AI, Azure, Replicate, ElevenLabs, Sarvam, Runway, Runware + the `openai_compat` factory (22 OpenAI-wire-compatible vendors, incl. z.ai GLM, Moonshot, MiniMax, Opencode, Wafer). |
 | `kgateway-plugins` | Built-in plugins/observers: `logging`, `governance`, `semantic_cache`, `redaction`, `pricing`. |
 | `kgateway-store` | Persistence behind traits: `LogStore`, `VectorStore`, `GovernanceStore` — each with in-memory + SQLite/Postgres impls (sqlx). |
 | `kgateway-server` | axum HTTP gateway + control plane (the binary). `app.rs` wires config → engine; `handlers.rs` is the HTTP surface. |
@@ -63,7 +63,7 @@ Dependency direction: `server → plugins/providers/store → core`. Nothing dep
 
 - **Engine** (`kgateway-core::engine::Kgateway`) orchestrates: `pre_request` → `pre_llm` (may
   short-circuit) → routing/dispatch → provider call → `post_llm` → observers record.
-- **`Provider` trait** + opt-in capability traits (`Embeddings` / `Images` / `Audio` / `Rerank`).
+- **`Provider` trait** + opt-in capability traits (`Embeddings` / `Images` / `Audio` / `Rerank` / `Video`).
   A provider only implements what it supports; the engine checks capability before dispatch.
 - **`LlmPlugin`** (`pre_request` / `pre_llm` / `post_llm`) — **chat-only**, ordered, `post_llm`
   runs LIFO. Plugin `Err` is non-blocking (logged); to short-circuit, return a typed

@@ -54,7 +54,7 @@ impl GeminiProvider {
     }
 
     /// Convert an internal [`ChatRequest`] into a Gemini `generateContent` request body.
-    fn body(&self, req: &ChatRequest) -> GeminiRequest {
+    pub(crate) fn body(&self, req: &ChatRequest) -> GeminiRequest {
         // Gemini takes the system prompt as a top-level `systemInstruction` object;
         // pull every Role::System message out of the array and join their contents
         // into the instruction's parts.
@@ -182,7 +182,7 @@ fn net_err(e: reqwest::Error) -> KgError {
 // ---- Gemini wire types ----
 
 #[derive(Debug, Serialize)]
-struct GeminiRequest {
+pub(crate) struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiSystemInstruction>,
@@ -215,7 +215,7 @@ struct GeminiGenerationConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct GeminiResponse {
+pub(crate) struct GeminiResponse {
     #[serde(default)]
     candidates: Vec<GeminiCandidate>,
     #[serde(default, rename = "usageMetadata")]
@@ -247,7 +247,7 @@ struct GeminiUsageMetadata {
 }
 
 impl GeminiResponse {
-    fn into_chat_response(self, model: String) -> ChatResponse {
+    pub(crate) fn into_chat_response(self, model: String) -> ChatResponse {
         let first = self.candidates.first();
 
         // Concatenate all text parts of the first candidate into a single

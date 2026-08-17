@@ -161,7 +161,7 @@ fn encode_model_id(model_id: &str) -> String {
 }
 
 /// Split `ApiKey.value` into `(access_key_id, secret_access_key)`.
-fn parse_credentials(value: &str) -> Result<(&str, &str), KgError> {
+pub(crate) fn parse_credentials(value: &str) -> Result<(&str, &str), KgError> {
     value.split_once(':').ok_or_else(|| {
         KgError::new(
             KgErrorKind::Auth,
@@ -253,24 +253,24 @@ fn net_err(e: reqwest::Error) -> KgError {
 // ---- SigV4 signing ----
 
 /// Everything needed to produce a SigV4 `Authorization` header for one request.
-struct SigningInput<'a> {
-    access_key_id: &'a str,
-    secret: &'a str,
-    region: &'a str,
-    service: &'a str,
-    host: &'a str,
+pub(crate) struct SigningInput<'a> {
+    pub(crate) access_key_id: &'a str,
+    pub(crate) secret: &'a str,
+    pub(crate) region: &'a str,
+    pub(crate) service: &'a str,
+    pub(crate) host: &'a str,
     /// Canonical URI (already percent-encoded path), e.g. `/model/foo%3A0/converse`.
-    path: &'a str,
-    payload: &'a [u8],
-    now: chrono::DateTime<Utc>,
+    pub(crate) path: &'a str,
+    pub(crate) payload: &'a [u8],
+    pub(crate) now: chrono::DateTime<Utc>,
 }
 
 /// The signed material attached to the outgoing request.
-struct SignedRequest {
-    authorization: String,
-    amz_date: String,
+pub(crate) struct SignedRequest {
+    pub(crate) authorization: String,
+    pub(crate) amz_date: String,
     /// Lowercase hex SHA256 of the payload (also sent as `x-amz-content-sha256`).
-    payload_hash: String,
+    pub(crate) payload_hash: String,
 }
 
 /// Produce the SigV4 `Authorization` header (and the `x-amz-*` values) for a POST.
@@ -278,7 +278,7 @@ struct SignedRequest {
 /// Signs the fixed header set `host;x-amz-content-sha256;x-amz-date` — the minimal
 /// set Bedrock requires — following the standard 4-step AWS process: canonical
 /// request → string to sign → derived signing key → signature.
-fn sign(input: &SigningInput<'_>) -> SignedRequest {
+pub(crate) fn sign(input: &SigningInput<'_>) -> SignedRequest {
     let amz_date = input.now.format("%Y%m%dT%H%M%SZ").to_string();
     let datestamp = input.now.format("%Y%m%d").to_string();
     let payload_hash = sha256_hex(input.payload);

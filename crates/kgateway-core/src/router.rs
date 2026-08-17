@@ -87,6 +87,9 @@ impl Registry {
                 if p.as_rerank().is_some() {
                     capabilities.push("rerank");
                 }
+                if p.as_video().is_some() {
+                    capabilities.push("video");
+                }
                 ProviderSummary {
                     name: key.to_string(),
                     capabilities,

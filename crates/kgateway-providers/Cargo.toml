@@ -24,6 +24,12 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
+# Sarvam returns synthesized audio as base64 inside a JSON envelope rather than
+# as a raw body, so the connector has to decode it. Vertex also needs it for the
+# base64url segments of its service-account JWT.
+base64 = { workspace = true }
+# Vertex service-account auth: RS256 over the JWT assertion.
+ring = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

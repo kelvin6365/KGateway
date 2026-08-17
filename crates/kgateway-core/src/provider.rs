@@ -102,6 +102,10 @@ pub trait Provider: Send + Sync {
     fn as_rerank(&self) -> Option<&dyn Rerank> {
         None
     }
+
+    fn as_video(&self) -> Option<&dyn Video> {
+        None
+    }
 }
 
 // ---- Opt-in capability traits (implemented only where supported) ----
@@ -248,4 +252,116 @@ pub trait Rerank: Provider {
         key: &ApiKey,
         req: RerankRequest,
     ) -> Result<RerankResponse, KgError>;
+}
+
+// ---- Video ----
+
+/// Lifecycle of an asynchronous video generation job.
+///
+/// Providers map their own vocabulary onto these five. Anything unrecognized maps
+/// to [`VideoStatus::Running`] — optimistically, because an unknown state is not a
+/// failure and the client will poll again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoStatus {
+    /// Accepted upstream, not yet started.
+    Queued,
+    /// Generating.
+    Running,
+    /// Finished; [`VideoResponse::data`] carries the artifact(s).
+    Succeeded,
+    /// Terminal failure; [`VideoResponse::error`] carries the upstream reason.
+    Failed,
+    /// Cancelled upstream or by the account owner.
+    Cancelled,
+}
+
+impl VideoStatus {
+    /// Whether polling should stop.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// A video generation request.
+///
+/// Every field beyond `model` is optional so vendors can diverge without a
+/// breaking change; each adapter validates what it actually needs. Which *mode*
+/// runs is inferred from the inputs — `image` present selects image-to-video,
+/// otherwise text-to-video.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoGenerationRequest {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Seed image: an `https://` URL or a `data:image/...;base64,` URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u32>,
+    /// Provider-specific aspect/resolution token, e.g. `"1280:720"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+/// One produced artifact. Mirrors [`ImageData`] deliberately: a URL when the
+/// vendor hosts the file, inline base64 only when it doesn't.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b64_json: Option<String>,
+}
+
+/// The state of one video job. Returned by BOTH [`Video::video_generate`] (where
+/// `status` is normally `Queued` and `data` is empty) and
+/// [`Video::video_retrieve`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoResponse {
+    /// Opaque job handle.
+    ///
+    /// Providers set the **raw upstream id** here; the engine rewrites it to
+    /// `provider/keyid:rawid` before it reaches the client. Clients echo it back
+    /// verbatim to `GET /v1/videos/{provider}/{rest}`.
+    pub id: String,
+    pub status: VideoStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<VideoData>,
+    /// Upstream failure reason. Only set alongside [`VideoStatus::Failed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Seconds the client should wait before polling again. Adapters set a
+    /// vendor-aware value; the handler also emits it as a `Retry-After` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u32>,
+}
+
+/// Asynchronous video generation.
+///
+/// **Both methods must return promptly.** Generation runs for minutes — far past
+/// the 120s provider timeout and the gateway's 120s request timeout — so
+/// `video_generate` SUBMITS and returns a handle; it must never poll to
+/// completion. A blocking implementation would hold a per-provider semaphore
+/// permit for minutes *and still* time out. This is the one capability whose
+/// contract is asynchronous, and the split exists for exactly that reason.
+#[async_trait]
+pub trait Video: Provider {
+    async fn video_generate(
+        &self,
+        ctx: &Ctx,
+        key: &ApiKey,
+        req: VideoGenerationRequest,
+    ) -> Result<VideoResponse, KgError>;
+
+    /// Current state of a previously submitted job. `id` is the RAW upstream id —
+    /// the engine has already stripped the `provider/keyid:` routing prefix.
+    async fn video_retrieve(
+        &self,
+        ctx: &Ctx,
+        key: &ApiKey,
+        id: &str,
+    ) -> Result<VideoResponse, KgError>;
 }

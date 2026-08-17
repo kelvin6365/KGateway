@@ -37,6 +37,11 @@ serde_json = "1"
 
 # AWS SigV4 signing (hand-rolled, for the Bedrock connector)
 hmac = "0.12"
+# RS256 signing for the Vertex service-account JWT assertion. `ring` is ALREADY in
+# the tree via rustls, so this is a dependency edge, not a new lockfile node — and
+# deliberately not the `rsa` crate, which carries the Marvin timing advisory and is
+# the reason sqlx is built without MySQL.
+ring = "0.17"
 sha2 = "0.10"
 hex = "0.4"
 

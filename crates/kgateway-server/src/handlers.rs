@@ -12,6 +12,7 @@ use kgateway_core::context::Ctx;
 use kgateway_core::error::{KgError, KgErrorKind};
 use kgateway_core::provider::{
     EmbeddingRequest, ImageGenerationRequest, RerankRequest, SpeechRequest, TranscriptionRequest,
+    VideoGenerationRequest,
 };
 use kgateway_core::schema::ChatRequest;
 use kgateway_store::{
@@ -892,6 +893,30 @@ fn model_list_target(name: &str, pc: &ProviderConfig) -> Option<(ListWire, Strin
                 .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
         )),
         "cohere" => None,
+        // ElevenLabs has a `/v1/models` route, but its body is a bare array of voice
+        // models rather than the OpenAI `{data: [...]}` envelope — listing it through
+        // `ListWire::OpenAi` would just log a decode warning on every aggregate call.
+        "elevenlabs" => None,
+        // Replicate lists *deployments*, not models, under a paginated envelope
+        // that shares no shape with the OpenAI list response.
+        "replicate" => None,
+        // Bedrock Mantle's `base_url` holds a region, not a URL — listing through
+        // it would build a nonsense request.
+        "bedrock_mantle" => None,
+        // Vertex lists models under a project-scoped `publishers.models.list` route
+        // that shares no shape with the OpenAI list envelope.
+        "vertex" => None,
+        // Media-only providers with no model-list route of any shape.
+        "runway" | "runware" => None,
+        // Sarvam's model list is OpenAI-shaped but lives under `/v1`, which its
+        // `base_url` deliberately omits (the audio routes are unversioned).
+        "sarvam" => Some((
+            ListWire::OpenAi,
+            pc.base_url
+                .clone()
+                .map(|url| format!("{url}/v1"))
+                .unwrap_or_else(|| "https://api.sarvam.ai/v1".to_string()),
+        )),
         other => match kgateway_providers::openai_compat::default_base_url(other) {
             Some(default) => Some((
                 ListWire::OpenAi,
@@ -1169,6 +1194,58 @@ pub async fn images_generations(
     crate::otel::apply_trace_context(&mut ctx, &headers);
     match state.engine.load_full().image_generate(&ctx, req).await {
         Ok(resp) => Json(serde_json::json!({ "data": resp.data })).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `POST /v1/videos/generations` — submit an asynchronous video job.
+///
+/// Returns **202** with an opaque handle, never a finished artifact: generation
+/// runs for minutes, well past the gateway's request timeout. Poll
+/// `GET /v1/videos/{provider}/{id}` for the result.
+pub async fn videos_generations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<VideoGenerationRequest>,
+) -> Response {
+    let mut ctx = Ctx::new();
+    ctx.virtual_key = vkey_from_headers(&headers);
+    ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
+    crate::otel::apply_trace_context(&mut ctx, &headers);
+    match state.engine.load_full().video_generate(&ctx, req).await {
+        Ok(resp) => (axum::http::StatusCode::ACCEPTED, Json(resp)).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `GET /v1/videos/{provider}/{id}` — poll a submitted video job.
+///
+/// Returns 200 whenever the poll itself succeeds — including for a job that FAILED
+/// upstream, whose terminal state and reason are in the body. A non-200 here means
+/// the poll failed, not the job.
+pub async fn videos_retrieve(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((provider, id)): Path<(String, String)>,
+) -> Response {
+    let mut ctx = Ctx::new();
+    ctx.virtual_key = vkey_from_headers(&headers);
+    ctx.session_id = session_id_from(&headers, None);
+    ctx.user_agent = user_agent_from(&headers);
+    crate::otel::apply_trace_context(&mut ctx, &headers);
+    let handle = format!("{provider}/{id}");
+    match state.engine.load_full().video_retrieve(&ctx, &handle).await {
+        Ok(resp) => {
+            let mut r = Json(&resp).into_response();
+            // Only advertise a retry cadence while the job can still change.
+            if let Some(secs) = resp.retry_after.filter(|_| !resp.status.is_terminal()) {
+                if let Ok(v) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                    r.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+                }
+            }
+            r
+        }
         Err(e) => error_response(e),
     }
 }

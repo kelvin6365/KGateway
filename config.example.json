@@ -5,46 +5,120 @@
   "providers": {
     "openai": {
       "keys": [
-        { "id": "default", "value": "${OPENAI_API_KEY}", "weight": 1 }
+        {
+          "id": "default",
+          "value": "${OPENAI_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "anthropic": {
       "keys": [
-        { "id": "default", "value": "${ANTHROPIC_API_KEY}", "weight": 1 }
+        {
+          "id": "default",
+          "value": "${ANTHROPIC_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "groq": {
       "base_url": "https://api.groq.com/openai/v1",
       "keys": [
-        { "id": "default", "value": "${GROQ_API_KEY}", "weight": 1 }
+        {
+          "id": "default",
+          "value": "${GROQ_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "ollama": {
       "base_url": "http://localhost:11434/v1",
       "keys": [
-        { "id": "local", "value": "ollama", "weight": 1 }
+        {
+          "id": "local",
+          "value": "ollama",
+          "weight": 1
+        }
       ]
     },
     "zai": {
       "kind": "anthropic",
       "base_url": "https://api.z.ai/api/anthropic",
       "keys": [
-        { "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }
+        {
+          "id": "coding-plan",
+          "value": "${ZAI_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "zai-coding": {
       "keys": [
-        { "id": "coding-plan", "value": "${ZAI_API_KEY}", "weight": 1 }
+        {
+          "id": "coding-plan",
+          "value": "${ZAI_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "moonshot": {
       "keys": [
-        { "id": "default", "value": "${MOONSHOT_API_KEY}", "weight": 1 }
+        {
+          "id": "default",
+          "value": "${MOONSHOT_API_KEY}",
+          "weight": 1
+        }
       ]
     },
     "minimax": {
       "keys": [
-        { "id": "default", "value": "${MINIMAX_API_KEY}", "weight": 1 }
+        {
+          "id": "default",
+          "value": "${MINIMAX_API_KEY}",
+          "weight": 1
+        }
+      ]
+    },
+    "vertex": {
+      "kind": "vertex",
+      "base_url": "${GCP_PROJECT_ID}/us-central1",
+      "keys": [
+        {
+          "id": "default",
+          "value": "${GOOGLE_APPLICATION_CREDENTIALS}",
+          "weight": 1
+        }
+      ]
+    },
+    "bedrock_mantle": {
+      "kind": "bedrock-mantle",
+      "base_url": "us-east-1",
+      "keys": [
+        {
+          "id": "default",
+          "value": "${BEDROCK_MANTLE_API_KEY}",
+          "weight": 1
+        }
+      ]
+    },
+    "elevenlabs": {
+      "kind": "elevenlabs",
+      "keys": [
+        {
+          "id": "default",
+          "value": "${ELEVENLABS_API_KEY}",
+          "weight": 1
+        }
+      ]
+    },
+    "runway": {
+      "kind": "runway",
+      "keys": [
+        {
+          "id": "default",
+          "value": "${RUNWAY_API_KEY}",
+          "weight": 1
+        }
       ]
     }
   },
@@ -52,7 +126,10 @@
     {
       "id": "vk_team_alpha",
       "name": "Team Alpha",
-      "allowed_models": ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+      "allowed_models": [
+        "openai/gpt-4o",
+        "anthropic/claude-3-5-sonnet"
+      ],
       "denied_models": [],
       "max_requests_per_min": 60,
       "max_total_tokens": 1000000,
@@ -73,7 +150,15 @@
   "mcp": {
     "builtin_tools": true,
     "servers": [
-      { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/tmp"
+        ]
+      }
     ]
   }
 }

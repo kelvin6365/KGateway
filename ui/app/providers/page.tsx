@@ -45,6 +45,7 @@ const CAP_COLORS: Record<string, string> = {
   images: "#7c3aed",
   audio: "#db2777",
   rerank: "#16a34a",
+  video: "#ea580c",
 };
 
 /**
@@ -126,6 +127,76 @@ const CATALOG: CatalogEntry[] = [
     defaultBaseUrl: "http://localhost:30000/v1",
     keyPlaceholder: "sglang",
     keyHint: "Self-hosted — the key can be any placeholder value.",
+  },
+  {
+    name: "vertex",
+    label: "Google Vertex AI",
+    kind: "vertex",
+    baseUrlRequired: true,
+    baseUrlLabel: "Project / location",
+    defaultBaseUrl: "my-project/us-central1",
+    keyHint:
+      "Leave blank (or 'adc') for metadata-server credentials, paste service-account JSON, give a path to it, or use a plain API key for Gemini models only.",
+  },
+  {
+    name: "bedrock_mantle",
+    label: "Bedrock Mantle",
+    kind: "bedrock-mantle",
+    baseUrlLabel: "AWS region",
+    defaultBaseUrl: "us-east-1",
+    keyHint: "A Mantle API key, or ACCESS_KEY_ID:SECRET_ACCESS_KEY to sign with SigV4.",
+  },
+  {
+    name: "replicate",
+    label: "Replicate",
+    kind: "replicate",
+    defaultBaseUrl: "https://api.replicate.com",
+    keyPlaceholder: "r8_...",
+  },
+  {
+    name: "elevenlabs",
+    label: "ElevenLabs",
+    kind: "elevenlabs",
+    defaultBaseUrl: "https://api.elevenlabs.io",
+    keyHint: "Audio only — speech and transcription. No chat surface.",
+  },
+  {
+    name: "sarvam",
+    label: "Sarvam AI",
+    kind: "sarvam",
+    defaultBaseUrl: "https://api.sarvam.ai",
+    keyHint: "Chat plus Indic speech and transcription.",
+  },
+  {
+    name: "runway",
+    label: "Runway",
+    kind: "runway",
+    defaultBaseUrl: "https://api.dev.runwayml.com",
+    keyHint: "Images and video. Video jobs are async — submit, then poll.",
+  },
+  {
+    name: "runware",
+    label: "Runware",
+    kind: "runware",
+    defaultBaseUrl: "https://api.runware.ai/v1",
+    keyHint: "Images and video. Video jobs are async — submit, then poll.",
+  },
+  {
+    name: "opencode-zen",
+    label: "Opencode Zen",
+    defaultBaseUrl: "https://opencode.ai/zen/v1",
+    keyHint: "Pay-as-you-go key from opencode.ai/auth.",
+  },
+  {
+    name: "opencode-go",
+    label: "Opencode Go",
+    defaultBaseUrl: "https://opencode.ai/zen/go/v1",
+    keyHint: "Subscription plan endpoint.",
+  },
+  {
+    name: "wafer",
+    label: "Wafer",
+    defaultBaseUrl: "https://pass.wafer.ai/v1",
   },
   {
     name: "",

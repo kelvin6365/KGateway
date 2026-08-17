@@ -19,8 +19,9 @@ use kgateway_plugins::{
     VirtualKey,
 };
 use kgateway_providers::{
-    openai_compat, AnthropicProvider, AzureProvider, BedrockProvider, CohereProvider,
-    GeminiProvider, OpenAiProvider,
+    openai_compat, AnthropicProvider, AzureProvider, BedrockMantleProvider, BedrockProvider,
+    CohereProvider, ElevenLabsProvider, GeminiProvider, OpenAiProvider, ReplicateProvider,
+    RunwareProvider, RunwayProvider, SarvamProvider, VertexProvider,
 };
 use kgateway_store::{
     GovernanceStore, InMemoryGovernanceStore, InMemoryVectorStore, LogStore, MemoryLogStore,
@@ -624,6 +625,82 @@ pub fn build_engine(config: &Config) -> Kgateway {
                 }
                 continue;
             }
+            Some("elevenlabs") => {
+                // ElevenLabs: audio only (`xi-api-key` auth); chat is unsupported.
+                let base = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.elevenlabs.io".to_string());
+                registry.register(
+                    Arc::new(ElevenLabsProvider::with_identity(name, base)),
+                    keys,
+                );
+                continue;
+            }
+            Some("sarvam") => {
+                // Sarvam: OpenAI-wire chat under `/v1` + bespoke audio on the
+                // unversioned paths with a separate `api-subscription-key` header.
+                let base = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.sarvam.ai".to_string());
+                registry.register(Arc::new(SarvamProvider::with_identity(name, base)), keys);
+                continue;
+            }
+            Some("bedrock-mantle") | Some("bedrock_mantle") => {
+                // Bedrock Mantle: `base_url` carries the region (or a full endpoint
+                // override). Key is a Mantle API key, or "ACCESS_KEY_ID:SECRET" for SigV4.
+                let region = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "us-east-1".to_string());
+                registry.register(
+                    Arc::new(BedrockMantleProvider::with_identity(name, region)),
+                    keys,
+                );
+                continue;
+            }
+            Some("runway") => {
+                // Runway: async task API (images + video), Bearer + version header.
+                let base = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.dev.runwayml.com".to_string());
+                registry.register(Arc::new(RunwayProvider::with_identity(name, base)), keys);
+                continue;
+            }
+            Some("runware") => {
+                // Runware: single-endpoint task-array protocol (images + video).
+                let base = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.runware.ai/v1".to_string());
+                registry.register(Arc::new(RunwareProvider::with_identity(name, base)), keys);
+                continue;
+            }
+            Some("vertex") => {
+                // Vertex AI: `base_url` carries "{project}/{location}"; the key value's
+                // shape selects ADC / service-account / API-key auth.
+                let target = pc.base_url.clone().unwrap_or_default();
+                if target.is_empty() {
+                    tracing::warn!(
+                        provider = %name,
+                        "vertex provider requires base_url as \"{{project}}/{{location}}\"; skipping"
+                    );
+                    continue;
+                }
+                registry.register(Arc::new(VertexProvider::with_identity(name, target)), keys);
+                continue;
+            }
+            Some("replicate") => {
+                // Replicate: async predictions API (create → poll / SSE), Bearer auth.
+                let base = pc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.replicate.com".to_string());
+                registry.register(Arc::new(ReplicateProvider::with_identity(name, base)), keys);
+                continue;
+            }
             Some(other) => {
                 tracing::warn!(provider = %name, kind = %other, "unknown provider kind; falling back to name inference");
             }
@@ -652,6 +729,58 @@ pub fn build_engine(config: &Config) -> Kgateway {
                 };
                 registry.register(Arc::new(provider), keys);
             }
+            "elevenlabs" => {
+                let provider = match &pc.base_url {
+                    Some(url) => ElevenLabsProvider::with_base_url(url.clone()),
+                    None => ElevenLabsProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "sarvam" => {
+                let provider = match &pc.base_url {
+                    Some(url) => SarvamProvider::with_base_url(url.clone()),
+                    None => SarvamProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "replicate" => {
+                let provider = match &pc.base_url {
+                    Some(url) => ReplicateProvider::with_base_url(url.clone()),
+                    None => ReplicateProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "bedrock_mantle" => {
+                let provider = match &pc.base_url {
+                    Some(region) => BedrockMantleProvider::with_region(region.clone()),
+                    None => BedrockMantleProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "runway" => {
+                let provider = match &pc.base_url {
+                    Some(url) => RunwayProvider::with_base_url(url.clone()),
+                    None => RunwayProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "runware" => {
+                let provider = match &pc.base_url {
+                    Some(url) => RunwareProvider::with_base_url(url.clone()),
+                    None => RunwareProvider::new(),
+                };
+                registry.register(Arc::new(provider), keys);
+            }
+            "vertex" => match &pc.base_url {
+                Some(target) => registry.register(
+                    Arc::new(VertexProvider::with_base_url(target.clone())),
+                    keys,
+                ),
+                None => tracing::warn!(
+                    provider = %name,
+                    "vertex provider requires base_url as \"{{project}}/{{location}}\"; skipping"
+                ),
+            },
             // Known OpenAI-compatible vendors (groq, ollama, openrouter, xai, ...): use
             // the built-in default base URL, overridable via config.
             other if openai_compat::default_base_url(other).is_some() => {
@@ -693,6 +822,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/docs/{file}", get(handlers::endpoint_markdown))
         .route("/v1/embeddings", post(handlers::embeddings))
         .route("/v1/images/generations", post(handlers::images_generations))
+        .route("/v1/videos/generations", post(handlers::videos_generations))
+        .route("/v1/videos/{provider}/{id}", get(handlers::videos_retrieve))
         .route("/v1/audio/speech", post(handlers::audio_speech))
         .route(
             "/v1/audio/transcriptions",

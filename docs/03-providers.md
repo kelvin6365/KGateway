@@ -1,6 +1,6 @@
 # 03 — Providers (connectors)
 
-> **Implemented (20 connectors):** OpenAI, Anthropic, Cohere (native); Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Ollama, Mistral, Nebius, HuggingFace, z.ai GLM (`zai` pay-as-you-go + `zai-coding` Coding Plan), Moonshot (Kimi), MiniMax, vLLM, SGLang (OpenAI-compatible via `openai_compat`); **Bedrock** (Converse + SigV4), **Google Gemini** (native), **Azure OpenAI** (deployment routing). Anthropic-compatible custom providers (e.g. **z.ai GLM Coding Plan**, Moonshot `/anthropic`, MiniMax `/anthropic`) via `kind: "anthropic"`. Register any of the wire-format-specific ones under a custom name with `kind: "openai" | "anthropic" | "bedrock" | "gemini" | "azure"`. See [Verification status](#verification-status) for what has been exercised against live upstreams.
+> **Implemented (30 connectors):** OpenAI, Anthropic, Cohere (native); Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Ollama, Mistral, Nebius, HuggingFace, z.ai GLM (`zai` pay-as-you-go + `zai-coding` Coding Plan), Moonshot (Kimi), MiniMax, vLLM, SGLang (OpenAI-compatible via `openai_compat`); **Bedrock** (Converse + SigV4), **Google Gemini** (native), **Azure OpenAI** (deployment routing). Anthropic-compatible custom providers (e.g. **z.ai GLM Coding Plan**, Moonshot `/anthropic`, MiniMax `/anthropic`) via `kind: "anthropic"`. Opencode Zen/Go and Wafer (OpenAI-compatible). **Vertex AI** (project/location routing, ADC or service-account OAuth), **Bedrock Mantle** (three wire surfaces, Bearer or SigV4), **Replicate** (async predictions), **ElevenLabs** and **Sarvam** (audio), **Runway** and **Runware** (images + async video). Register any of the wire-format-specific ones under a custom name with `kind: "openai" | "anthropic" | "bedrock" | "bedrock-mantle" | "gemini" | "azure" | "vertex" | "replicate" | "elevenlabs" | "sarvam" | "runway" | "runware"`. See [Verification status](#verification-status) for what has been exercised against live upstreams.
 
 ## Verification status
 
@@ -17,6 +17,14 @@ What each provider has actually been exercised against, beyond the unit/e2e test
 | **Anthropic (Claude)** — `anthropic` | Anthropic native | 🧪 **Unit-tested (mocked)** — incl. tools + streaming; the same connector code path is what `zai` runs on, which **is** live-verified; pending live key |
 | Cohere, Bedrock, Gemini, Azure | native | 🧪 Unit-tested (mocked); pending live key |
 | Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, Ollama, vLLM, SGLang | OpenAI-compat | 🧪 Shared OpenAI connector (live-verified via `zai-coding`); per-vendor base URLs unit-tested; pending live key |
+| Opencode Zen — `opencode-zen`, Opencode Go — `opencode-go`, Wafer — `wafer` | OpenAI-compat | 🧪 Shared OpenAI connector; base URLs unit-tested (incl. a guard that `opencode-go` nests under `opencode-zen`); pending live key |
+| **Vertex AI** — `vertex` | Gemini wire, OAuth2 | 🧪 Unit-tested (mocked) — host/path/credential-mode selection and the RS256 assertion's pure parts. The **service-account signature itself is not exercised in CI**: `ring` cannot generate RSA keys and no key may be committed, so that case is gated behind `KGATEWAY_TEST_GCP_SA`. Streaming unimplemented. |
+| **Bedrock Mantle** — `bedrock_mantle` | Anthropic + OpenAI, SigV4 or Bearer | 🧪 Unit-tested (mocked) — three-way model routing, both auth modes, and a signing test asserting the `bedrock-mantle` credential scope. Streaming unimplemented. |
+| **Replicate** — `replicate` | predictions API | 🧪 Unit-tested (mocked) — both model-id routes, bounded polling, SSE token stream |
+| **ElevenLabs** — `elevenlabs` | bespoke audio | 🧪 Unit-tested (mocked) — TTS + STT. No chat surface; TTS streaming unimplemented (the `Audio` trait has no streaming method) |
+| **Sarvam** — `sarvam` | OpenAI chat + bespoke audio | 🧪 Unit-tested (mocked). **Audio field names are inferred from vendor docs, not observed** — confirm `inputs`/`speaker`/`audios`/`transcript` against a live account before relying on them |
+| **Runway** — `runway` | async task API | 🧪 Unit-tested (mocked) — images (sync poll) + video (async submit/poll) |
+| **Runware** — `runware` | task-array protocol | 🧪 Unit-tested (mocked) — images (usually inline) + video (async submit/poll) |
 
 To promote a 🟡/🧪 provider to ✅: export its `${ENV}` key, send one unary + one streamed
 chat through the gateway, and hit `/v1/models` — then update this table.
@@ -32,7 +40,8 @@ A single **100+ method** provider contract that every provider must satisfy — 
 trait Provider { key; chat; chat_stream }
 
 // Opt-in, implemented only where supported
-trait Embeddings / Images / Audio / Rerank / Responses / Batch / Files / Video / OCR / CachedContent / Containers
+trait Embeddings / Images / Audio / Rerank / Video     // implemented
+trait Responses / Batch / Files / OCR / CachedContent / Containers   // not yet
 ```
 
 ## The OpenAI-compatible shortcut
@@ -50,7 +59,7 @@ impl Provider for OpenAiCompatible { /* reuse OpenAI encode/decode */ }
 
 This makes ~9 connectors nearly free once OpenAI works.
 
-## Full connector matrix (target: 23 connectors)
+## Full connector matrix (target: 30 connectors)
 
 | Provider | Wire family | Auth | Notes / port strategy | Milestone |
 |---|---|---|---|---|

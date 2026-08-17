@@ -2,7 +2,7 @@
 
 # KGateway
 
-**One OpenAI-compatible API in front of 25 LLM providers.**
+**One OpenAI-compatible API in front of 35 LLM providers.**
 
 Failover · load balancing · semantic cache · budgets & rate limits · PII redaction · tracing · dashboard
 
@@ -54,7 +54,7 @@ restart.
 
 ## Why KGateway?
 
-- **One API, every provider.** Point any OpenAI SDK at KGateway and switch between 25 providers
+- **One API, every provider.** Point any OpenAI SDK at KGateway and switch between 35 providers
   by changing a `"provider/model"` string — no per-vendor client code.
 - **Requests don't drop.** Provider failover + weighted key rotation + retry with backoff, on
   unary **and** streaming (a first-chunk peek fails over before the client sees a byte).
@@ -149,7 +149,7 @@ Setup guides for Claude Code, the OMP CLI, and the Pi CLI — including the comm
 | Area | Capabilities |
 |---|---|
 | **API** | OpenAI-compatible `/v1/chat/completions` (JSON + SSE), `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, aggregated `/v1/models`, plus **Anthropic-compatible `/v1/messages`** ingress. Full request-param fidelity (`seed`, `response_format`, penalties, tool-choice, …) and an `extra` passthrough so no client field is dropped. |
-| **Providers (25)** | **Native:** OpenAI, Anthropic, Cohere, Amazon Bedrock, Google Gemini, Azure OpenAI. **OpenAI-compatible:** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, z.ai GLM, Moonshot (Kimi), MiniMax, Ollama, vLLM, SGLang. See the [verification-status table](docs/03-providers.md#verification-status). |
+| **Providers (35)** | **Native:** OpenAI, Anthropic, Cohere, Amazon Bedrock, Bedrock Mantle, Google Gemini, Google Vertex AI, Azure OpenAI, Replicate, ElevenLabs, Sarvam, Runway, Runware. **OpenAI-compatible:** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, z.ai GLM, Moonshot (Kimi), MiniMax, Ollama, vLLM, SGLang, Opencode Zen, Opencode Go, Wafer. See the [verification-status table](docs/03-providers.md#verification-status). |
 | **Routing** | Primary + `fallbacks[]` provider failover, weighted key selection, per-key retry with backoff + jitter, per-provider concurrency isolation, dead-key vs used-key rotation — on unary **and** streaming. |
 | **Governance** | Virtual keys: model allow/deny-lists, request rate limits, token budgets, per-period USD cost budgets. In-process counters by default, **shared Postgres** for horizontal scaling. |
 | **Caching** | Two-tier semantic cache (exact-hash tier + embedding similarity), params/model-scoped. In-memory or persistent **pgvector** (survives restart, shared across replicas). |
@@ -221,7 +221,7 @@ Dependency direction: `server → plugins / providers / store → core`. Nothing
 | Crate | Role |
 |---|---|
 | `kgateway-core` | The engine: schemas, `Provider`/`LlmPlugin`/`RequestObserver` traits, routing + failover, streaming, plugin pipeline. No HTTP dependency — embeddable. |
-| `kgateway-providers` | Provider connectors: 6 native + the OpenAI-compatible factory (19 vendors). |
+| `kgateway-providers` | Provider connectors: 13 native + the OpenAI-compatible factory (22 vendors). |
 | `kgateway-plugins` | Built-in plugins: logging, governance, semantic cache, redaction, pricing. |
 | `kgateway-store` | Persistence behind `LogStore` / `VectorStore` / `GovernanceStore` traits — in-memory, SQLite, Postgres. |
 | `kgateway-server` | axum HTTP gateway + control plane (the binary). |
@@ -265,7 +265,7 @@ See [`docs/06-deployment.md`](docs/06-deployment.md).
 | [Getting started](docs/08-getting-started.md) | 5-minute guide: run, first request, dashboard, Claude Code / OMP / Pi setup, troubleshooting |
 | [Configuration reference](docs/16-configuration.md) | Every config field, type, and default |
 | [Architecture](docs/01-architecture.md) | Engine, traits, request flow, streaming |
-| [Providers](docs/03-providers.md) | All 25 providers + live-verification status |
+| [Providers](docs/03-providers.md) | All 35 providers + live-verification status |
 | [Security](docs/09-security.md) | Redaction, RBAC, key handling |
 | [Performance](docs/15-performance.md) | Benchmark methodology + results |
 | [Roadmap](docs/02-roadmap.md) | Milestone history and what's next |

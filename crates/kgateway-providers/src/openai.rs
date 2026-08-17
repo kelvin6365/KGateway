@@ -47,7 +47,11 @@ impl OpenAiProvider {
 
     /// Build the upstream JSON body: strip gateway-only fields, use the bare model id.
     /// Propagates a serialization failure rather than silently POSTing a `null` body.
-    fn body(&self, req: &ChatRequest, stream: bool) -> Result<serde_json::Value, KgError> {
+    pub(crate) fn body(
+        &self,
+        req: &ChatRequest,
+        stream: bool,
+    ) -> Result<serde_json::Value, KgError> {
         let mut v = serde_json::to_value(req).map_err(|e| {
             KgError::new(KgErrorKind::Internal, format!("request encode error: {e}"))
         })?;

@@ -8,6 +8,34 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Ten new providers — provider parity with the reference gateway (25 → 35 named providers).**
+  Three are OpenAI-wire and cost one line each in `openai_compat::KNOWN`: **Opencode Zen**
+  (`https://opencode.ai/zen/v1`), **Opencode Go** (`https://opencode.ai/zen/go/v1`, which nests
+  *under* the Zen path — pinned by a test, since swapping them would silently route subscription
+  traffic to the metered endpoint), and **Wafer** (`https://pass.wafer.ai/v1`). Seven are native
+  connectors: **Google Vertex AI** (project/location routing via `base_url`, regional host
+  computation incl. the `global`/`us`/`eu` pools, and four credential modes selected by the shape
+  of the key value — metadata-server ADC, inline service-account JSON, a path to one, or a plain
+  API key for Gemini publishers only); **Bedrock Mantle** (three wire surfaces on one host chosen
+  by model family, dual Bearer/SigV4 auth signed for the `bedrock-mantle` service); **Replicate**
+  (async predictions API with `Prefer: wait`, bounded polling, and an SSE token stream);
+  **ElevenLabs** and **Sarvam** (the first `Audio` implementers outside OpenAI); **Runway** and
+  **Runware** (images plus async video). All ten are wiremock-verified only — see the
+  [verification-status table](docs/03-providers.md#verification-status).
+- **`Video` capability trait + two endpoints.** `POST /v1/videos/generations` **submits** a job and
+  returns `202` with an opaque handle; `GET /v1/videos/{provider}/{id}` polls it. Generation runs
+  for minutes, far past the 120s provider and request timeouts, so `video_generate` deliberately
+  never blocks — a blocking implementation would hold a per-provider semaphore permit for minutes
+  *and still* time out. The handle is `provider/keyid:rawid`, which keeps the gateway stateless
+  (no job table, no background poller) while pinning the credential that submitted the job, since
+  vendor job ids are account-scoped. Retrieve routes through a new model-agnostic
+  `resolve_provider` — the normal resolver filters keys by `ApiKey::models`, which would exclude
+  every model-restricted key when the "model" is really a job id. Poll responses carry
+  `Retry-After` while the job is live, and return 200 even for a job that failed upstream (a
+  non-200 means the *poll* failed). Video generate captures the prompt with any `data:` image
+  input elided; retrieve captures nothing in either direction, because the response is a signed
+  artifact URL.
+
 - **Connected clients on the dashboard + User-Agent capture.** The gateway now records each
   request's `User-Agent` (sanitized, length-capped — an opaque diagnostic label, never request
   content, and never forwarded upstream) into a new `user_agent` log column (SQLite + Postgres,

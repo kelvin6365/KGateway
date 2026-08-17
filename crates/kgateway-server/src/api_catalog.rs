@@ -334,6 +334,44 @@ OpenAI does not.",
         response: "",
     },
     Endpoint {
+        method: "POST",
+        path: "/v1/videos/generations",
+        auth: Auth::DataPlane,
+        summary: "Submit a video generation job",
+        description: "Asynchronous, unlike every other data-plane endpoint. Generation runs for \
+minutes — past the gateway's request timeout — so this SUBMITS and returns `202` with an opaque \
+`id` immediately; it never blocks for the artifact. Poll `GET /v1/videos/{provider}/{id}` until \
+`status` is `succeeded`, `failed`, or `cancelled`, honouring `retry_after`. The gateway stores \
+nothing: the id encodes the provider and the credential that submitted the job, so it stays valid \
+across restarts and replicas.",
+        params: &[
+            MODEL_PARAM,
+            Param { name: "prompt", location: "body", ty: "string", required: false, description: "What to generate. Required unless `image` is set." },
+            Param { name: "image", location: "body", ty: "string", required: false, description: "Seed image URL or `data:` URI. Its presence selects image-to-video." },
+            Param { name: "duration_seconds", location: "body", ty: "integer", required: false, description: "Clip length. Vendors accept a small fixed set, often 5 or 10." },
+            Param { name: "ratio", location: "body", ty: "string", required: false, description: "Provider-specific resolution token, e.g. `1280:720`." },
+        ],
+        example: r#"curl -i http://localhost:8080/v1/videos/generations \
+  -H 'content-type: application/json' \
+  -d '{"model":"runway/gen4_turbo","prompt":"a red bicycle in the rain","ratio":"1280:720"}'"#,
+        response: r#"{"id": "runway/default:9f3c1b2a", "status": "queued", "retry_after": 5}"#,
+    },
+    Endpoint {
+        method: "GET",
+        path: "/v1/videos/{provider}/{id}",
+        auth: Auth::DataPlane,
+        summary: "Poll a video generation job",
+        description: "Returns 200 whenever the poll itself succeeds — including for a job that \
+FAILED upstream, whose terminal state and reason are in the body. A non-200 here means the poll \
+failed, not the job. Append the `id` from the submit response verbatim.",
+        params: &[
+            Param { name: "provider", location: "path", ty: "string", required: true, description: "First segment of the submitted id, e.g. `runway`." },
+            Param { name: "id", location: "path", ty: "string", required: true, description: "Remainder of the submitted id, e.g. `default:9f3c1b2a`." },
+        ],
+        example: "curl http://localhost:8080/v1/videos/runway/default:9f3c1b2a",
+        response: r#"{"id": "runway/default:9f3c1b2a", "status": "succeeded", "data": [{"url": "https://..."}]}"#,
+    },
+    Endpoint {
         method: "GET",
         path: "/health",
         auth: Auth::Public,

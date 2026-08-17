@@ -33,6 +33,14 @@ const KNOWN: &[(&str, &str)] = &[
     // MiniMax. Also speaks Anthropic wire at https://api.minimax.io/anthropic
     // (use `kind: "anthropic"`).
     ("minimax", "https://api.minimax.io/v1"),
+    // Opencode model brokers. `opencode-zen` is the pay-as-you-go key from
+    // opencode.ai/auth; `opencode-go` is the subscription plan. Both serve the
+    // same OpenAI wire — note `opencode-go` nests under the `zen` path, so its
+    // URL is a strict extension of `opencode-zen`'s, not a sibling.
+    ("opencode-zen", "https://opencode.ai/zen/v1"),
+    ("opencode-go", "https://opencode.ai/zen/go/v1"),
+    // Wafer. Passes unknown params through to the upstream model untouched.
+    ("wafer", "https://pass.wafer.ai/v1"),
     // Self-hosted OpenAI-compatible servers — override base_url in config.
     ("vllm", "http://localhost:8000/v1"),
     ("sglang", "http://localhost:30000/v1"),
@@ -110,6 +118,50 @@ mod tests {
         assert_eq!(
             default_base_url("minimax"),
             Some("https://api.minimax.io/v1")
+        );
+        assert_eq!(
+            default_base_url("opencode-zen"),
+            Some("https://opencode.ai/zen/v1")
+        );
+        assert_eq!(
+            default_base_url("opencode-go"),
+            Some("https://opencode.ai/zen/go/v1")
+        );
+        assert_eq!(default_base_url("wafer"), Some("https://pass.wafer.ai/v1"));
+    }
+
+    /// `OpenAiProvider` appends `/chat/completions` to the stored base URL, so every
+    /// entry must already carry the vendor's version segment. A missing `/v1` yields
+    /// a 404 that is indistinguishable from an auth failure at the call site.
+    #[test]
+    fn every_known_base_url_carries_its_version_segment() {
+        for (name, url) in KNOWN {
+            assert!(
+                url.ends_with("/v1")
+                    || url.ends_with("/v4")
+                    || *name == "deepseek"
+                    || *name == "perplexity",
+                "{name}: base URL {url} has no version segment; \
+                 chat would POST to a versionless /chat/completions"
+            );
+        }
+    }
+
+    /// The two Opencode plans share a host and a path prefix — `opencode-go` nests
+    /// *under* `opencode-zen`. Swapping them silently routes subscription traffic to
+    /// the metered endpoint, so pin both directions.
+    #[test]
+    fn opencode_plans_are_distinct_and_correctly_nested() {
+        let zen = default_base_url("opencode-zen").expect("zen is known");
+        let go = default_base_url("opencode-go").expect("go is known");
+        assert_ne!(zen, go);
+        assert!(
+            go.starts_with("https://opencode.ai/zen/go"),
+            "opencode-go must nest under the zen path, got {go}"
+        );
+        assert!(
+            !zen.contains("/go"),
+            "opencode-zen must not carry the go segment, got {zen}"
         );
     }
 

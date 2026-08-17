@@ -13,7 +13,7 @@ use crate::plugin::{LlmPlugin, PreOutcome};
 use crate::provider::{
     ApiKey, ChunkStream, EmbeddingRequest, EmbeddingResponse, ImageGenerationRequest,
     ImageResponse, ProviderKey, RerankRequest, RerankResponse, SpeechRequest, SpeechResponse,
-    TranscriptionRequest, TranscriptionResponse,
+    TranscriptionRequest, TranscriptionResponse, VideoGenerationRequest, VideoResponse,
 };
 use crate::router::{ProviderEntry, Registry};
 use crate::schema::{
@@ -820,6 +820,134 @@ impl Kgateway {
         Ok((entry, key, model_id))
     }
 
+    /// Resolve a bare provider name and a key, WITHOUT model-based key filtering.
+    ///
+    /// [`Self::resolve`] runs `keyselect::eligible_keys`, which filters on
+    /// `ApiKey::models`. A job-handle lookup is not a model call, so applying that
+    /// filter would exclude every model-restricted key and produce a spurious "no
+    /// eligible API keys". `prefer_key_id` pins the key that submitted the job —
+    /// vendor job ids are account-scoped, so retrieving with a different key 404s.
+    fn resolve_provider<'a>(
+        &'a self,
+        provider_name: &str,
+        prefer_key_id: Option<&str>,
+    ) -> Result<(&'a ProviderEntry, &'a ApiKey), KgError> {
+        let provider_key = ProviderKey::new(provider_name);
+        let entry = self.registry.get(&provider_key).ok_or_else(|| {
+            KgError::new(
+                KgErrorKind::BadRequest,
+                format!("unknown provider: {provider_key}"),
+            )
+        })?;
+        if let Some(id) = prefer_key_id {
+            if let Some(k) = entry.keys.iter().find(|k| k.id == id) {
+                return Ok((entry, k));
+            }
+        }
+        // The pinned key is gone (rotated out of config) or none was given: fall
+        // back to a weighted pick rather than failing outright.
+        let all: Vec<&ApiKey> = entry.keys.iter().collect();
+        let mut rng = StdRng::from_entropy();
+        let key = keyselect::weighted_pick(&all, &mut rng).ok_or_else(|| {
+            KgError::new(KgErrorKind::Auth, format!("no API keys for {provider_key}"))
+        })?;
+        Ok((entry, key))
+    }
+
+    /// Submit an asynchronous video generation job.
+    ///
+    /// Follows the [`Self::image_generate`] template, with one addition: the returned
+    /// handle is rewritten to `provider/keyid:rawid` so a later [`Self::video_retrieve`]
+    /// routes back to the same provider AND the same credential. That keeps the
+    /// gateway stateless — no job table, no background poller.
+    pub async fn video_generate(
+        &self,
+        ctx: &Ctx,
+        mut req: VideoGenerationRequest,
+    ) -> Result<VideoResponse, KgError> {
+        let model_full = req.model.clone();
+        if let Err(e) = self.observe_check(ctx, &model_full).await {
+            self.observe_record(ctx, cap_record(&model_full, e.http_status(), 0, 0))
+                .await;
+            return Err(e);
+        }
+        let (entry, key, model_id) = self.resolve(&req.model)?;
+        let cap = entry
+            .provider
+            .as_video()
+            .ok_or_else(|| KgError::unsupported(format!("video for {}", entry.provider.key())))?;
+        req.model = model_id;
+        let _permit = self.permit(entry).await?;
+        // Capture matrix: video logs the prompt/params only, with a `data:` image
+        // input elided first — capturing megabytes of base64 would crowd out every
+        // other field. The response is `{id, status}`, gateway-authored and with no
+        // signal worth storing.
+        let req_body = self.capture(&scrub_video_request(&req));
+        let result = cap.video_generate(ctx, key, req).await.map(|mut v| {
+            v.id = format!("{}/{}:{}", entry.provider.key(), key.id, v.id);
+            v
+        });
+        // 202: the job was accepted, not completed. A client must not read a 200
+        // here as "the video is ready".
+        let status = result
+            .as_ref()
+            .map(|_| 202)
+            .unwrap_or_else(|e| e.http_status());
+        let mut rec = cap_record(&model_full, status, 0, 0);
+        rec.request_body = req_body;
+        self.observe_record(ctx, rec).await;
+        result
+    }
+
+    /// Fetch the state of a submitted video job.
+    ///
+    /// `handle` is `provider/keyid:rawid` as returned by [`Self::video_generate`];
+    /// a bare `provider/rawid` is also accepted and selects any key.
+    pub async fn video_retrieve(&self, ctx: &Ctx, handle: &str) -> Result<VideoResponse, KgError> {
+        let (provider_name, rest) = handle.split_once('/').ok_or_else(|| {
+            KgError::new(KgErrorKind::BadRequest, "video id must be `provider/<id>`")
+        })?;
+        let (key_id, raw_id) = match rest.split_once(':') {
+            Some((k, r)) => (Some(k), r),
+            None => (None, rest),
+        };
+        if raw_id.is_empty() {
+            return Err(KgError::new(
+                KgErrorKind::BadRequest,
+                "video id is missing its upstream job id",
+            ));
+        }
+        // Observed like every other capability: a poll is a real upstream call and
+        // must count against a virtual key's budget, or it becomes a bypass.
+        let model_full = format!("{provider_name}/video");
+        if let Err(e) = self.observe_check(ctx, &model_full).await {
+            self.observe_record(ctx, cap_record(&model_full, e.http_status(), 0, 0))
+                .await;
+            return Err(e);
+        }
+        let (entry, key) = self.resolve_provider(provider_name, key_id)?;
+        let cap = entry
+            .provider
+            .as_video()
+            .ok_or_else(|| KgError::unsupported(format!("video for {}", entry.provider.key())))?;
+        let _permit = self.permit(entry).await?;
+        let result = cap.video_retrieve(ctx, key, raw_id).await.map(|mut v| {
+            // Echo the handle the caller presented so it stays pollable.
+            v.id = handle.to_string();
+            v
+        });
+        let status = result
+            .as_ref()
+            .map(|_| 200)
+            .unwrap_or_else(|e| e.http_status());
+        // Capture matrix: NOTHING is captured on retrieve. The request is an opaque
+        // id, and the response is either a signed artifact URL — a credential in its
+        // own right — or a base64 blob. Neither belongs in a `logs:view` column.
+        self.observe_record(ctx, cap_record(&model_full, status, 0, 0))
+            .await;
+        result
+    }
+
     /// Embeddings request. Runs observers (governance/audit), routes by `provider/model`,
     /// checks the `Embeddings` capability, selects a weighted key, holds an isolation permit.
     pub async fn embed(
@@ -1426,6 +1554,17 @@ fn chat_record(model_full: &str, result: &Result<ChatResponse, KgError>) -> Call
     }
 }
 
+/// Elide a `data:` image input before capture. The URL form is a pointer worth
+/// keeping; a data URI is megabytes of base64 that would crowd out every other
+/// field in the audit row (and be truncated mid-blob anyway).
+fn scrub_video_request(req: &VideoGenerationRequest) -> VideoGenerationRequest {
+    let mut out = req.clone();
+    if out.image.as_deref().is_some_and(|s| s.starts_with("data:")) {
+        out.image = Some("<inline image elided>".to_string());
+    }
+    out
+}
+
 /// Build a [`CallRecord`] for a capability (non-chat) outcome with explicit status/tokens.
 fn cap_record(
     model_full: &str,
@@ -1495,7 +1634,7 @@ impl ChatRequest {
 mod tests {
     use super::*;
     use crate::plugin::Plugin;
-    use crate::provider::{ApiKey, Embeddings, Provider};
+    use crate::provider::{ApiKey, Embeddings, Provider, VideoGenerationRequest};
     use crate::schema::{
         ChatResponse, Choice, FunctionCallDelta, Message, Role, ToolCallDelta, Usage,
     };
@@ -3043,5 +3182,161 @@ mod tests {
         let mut ctx = Ctx::new();
         let resp = engine.chat_agentic(&mut ctx, req(), 8).await.unwrap();
         assert_eq!(resp.choices[0].message.text_content(), Some("real answer"));
+    }
+
+    // ---- Video capability (M-video) ----
+
+    /// The `Video` trait ships with no provider implementing it, so every existing
+    /// connector must decline rather than silently claim the capability.
+    #[tokio::test]
+    async fn video_is_unsupported_on_providers_that_do_not_implement_it() {
+        let engine = Kgateway::new(registry_with_ok_provider());
+        let ctx = Ctx::new();
+        let err = engine
+            .video_generate(
+                &ctx,
+                VideoGenerationRequest {
+                    model: "openai/any".into(),
+                    prompt: Some("a cat".into()),
+                    image: None,
+                    duration_seconds: None,
+                    ratio: None,
+                    seed: None,
+                },
+            )
+            .await
+            .expect_err("no provider implements Video yet");
+        assert_eq!(err.kind, KgErrorKind::Unsupported);
+        // Surfaces as 501, not 500 — the request was well-formed.
+        assert_eq!(err.http_status(), 501);
+    }
+
+    #[tokio::test]
+    async fn video_retrieve_rejects_a_handle_without_a_provider_segment() {
+        let engine = Kgateway::new(registry_with_ok_provider());
+        let ctx = Ctx::new();
+        let err = engine
+            .video_retrieve(&ctx, "no-slash-here")
+            .await
+            .expect_err("a bare id cannot be routed");
+        assert_eq!(err.kind, KgErrorKind::BadRequest);
+        assert_eq!(err.http_status(), 400);
+    }
+
+    #[tokio::test]
+    async fn video_retrieve_rejects_a_handle_with_an_empty_job_id() {
+        let engine = Kgateway::new(registry_with_ok_provider());
+        let ctx = Ctx::new();
+        let err = engine
+            .video_retrieve(&ctx, "openai/keyid:")
+            .await
+            .expect_err("an empty upstream id cannot be polled");
+        assert_eq!(err.kind, KgErrorKind::BadRequest);
+    }
+
+    /// Regression: `resolve()` filters keys by `ApiKey::models`. A job handle is not
+    /// a model, so routing a retrieve through `resolve()` would exclude every
+    /// model-restricted key and fail with a spurious auth error. This is only
+    /// reachable when keys carry a model allow-list, which local testing rarely does.
+    #[test]
+    fn resolve_provider_ignores_the_model_allow_list() {
+        let mut r = Registry::new();
+        r.register(
+            Arc::new(OkProvider),
+            vec![ApiKey {
+                id: "restricted".into(),
+                value: "v".into(),
+                weight: 1,
+                // This key may only serve `gpt-4o` — a job id matches nothing.
+                models: vec!["gpt-4o".into()],
+            }],
+        );
+        let engine = Kgateway::new(r);
+
+        // The model-filtered path finds nothing for a job-id-shaped "model"...
+        assert!(
+            engine.resolve("openai/task-abc").is_err(),
+            "resolve() is expected to reject it — that is the bug being guarded"
+        );
+        // ...but the provider-only path still selects the key.
+        let (_, key) = engine
+            .resolve_provider("openai", None)
+            .expect("resolve_provider must ignore the model allow-list");
+        assert_eq!(key.id, "restricted");
+    }
+
+    #[test]
+    fn resolve_provider_pins_the_requested_key_and_falls_back_when_it_is_gone() {
+        let mut r = Registry::new();
+        r.register(
+            Arc::new(OkProvider),
+            vec![
+                ApiKey {
+                    id: "a".into(),
+                    value: "va".into(),
+                    weight: 1,
+                    models: vec![],
+                },
+                ApiKey {
+                    id: "b".into(),
+                    value: "vb".into(),
+                    weight: 1,
+                    models: vec![],
+                },
+            ],
+        );
+        let engine = Kgateway::new(r);
+
+        // Vendor job ids are account-scoped, so the submitting key must be pinned.
+        for _ in 0..20 {
+            let (_, key) = engine.resolve_provider("openai", Some("b")).unwrap();
+            assert_eq!(key.id, "b", "the pinned key must win every time");
+        }
+
+        // A key rotated out of config must degrade to a weighted pick, not an error.
+        let (_, key) = engine
+            .resolve_provider("openai", Some("gone"))
+            .expect("a stale key id must not hard-fail the poll");
+        assert!(key.id == "a" || key.id == "b");
+    }
+
+    #[test]
+    fn resolve_provider_reports_an_unknown_provider_as_bad_request() {
+        let engine = Kgateway::new(registry_with_ok_provider());
+        // `ProviderEntry` is not `Debug`, so unwrap the error side explicitly.
+        let err = engine
+            .resolve_provider("nope", None)
+            .err()
+            .expect("an unregistered provider cannot be resolved");
+        assert_eq!(err.kind, KgErrorKind::BadRequest);
+    }
+
+    /// A `data:` seed image must never reach the audit log verbatim — it would be
+    /// megabytes of base64 crowding out every other captured field.
+    #[test]
+    fn scrub_video_request_elides_inline_images_but_keeps_urls() {
+        let base = VideoGenerationRequest {
+            model: "runway/gen4".into(),
+            prompt: Some("keep me".into()),
+            image: Some("data:image/png;base64,AAAABBBBCCCC".into()),
+            duration_seconds: Some(5),
+            ratio: None,
+            seed: None,
+        };
+        let scrubbed = scrub_video_request(&base);
+        assert_eq!(scrubbed.image.as_deref(), Some("<inline image elided>"));
+        // Everything else survives — the prompt is the useful part of the record.
+        assert_eq!(scrubbed.prompt.as_deref(), Some("keep me"));
+        assert_eq!(scrubbed.duration_seconds, Some(5));
+
+        let hosted = VideoGenerationRequest {
+            image: Some("https://example.test/seed.png".into()),
+            ..base
+        };
+        assert_eq!(
+            scrub_video_request(&hosted).image.as_deref(),
+            Some("https://example.test/seed.png"),
+            "a URL is a pointer, not content — keep it"
+        );
     }
 }

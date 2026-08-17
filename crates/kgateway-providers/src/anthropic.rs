@@ -79,7 +79,7 @@ impl AnthropicProvider {
     /// tools, assistant `tool_calls` → `tool_use` blocks, and `Role::Tool` → `tool_result`
     /// blocks. Consecutive same-role turns are merged, since Anthropic requires strictly
     /// alternating user/assistant messages (Claude Code batches tool results into one turn).
-    fn body(&self, req: &ChatRequest, stream: bool) -> AnthropicRequest {
+    pub(crate) fn body(&self, req: &ChatRequest, stream: bool) -> AnthropicRequest {
         let mut system_parts: Vec<String> = Vec::new();
         // (role, content-blocks) pairs, block-form throughout so merging is uniform.
         let mut turns: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
@@ -328,7 +328,7 @@ fn net_err(e: reqwest::Error) -> KgError {
 // ---- Anthropic wire types ----
 
 #[derive(Debug, Serialize)]
-struct AnthropicRequest {
+pub(crate) struct AnthropicRequest {
     model: String,
     max_tokens: u32,
     messages: Vec<AnthropicMessage>,
@@ -363,7 +363,7 @@ struct AnthropicTool {
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicResponse {
+pub(crate) struct AnthropicResponse {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -400,7 +400,7 @@ struct AnthropicUsage {
 }
 
 impl AnthropicResponse {
-    fn into_chat_response(self) -> ChatResponse {
+    pub(crate) fn into_chat_response(self) -> ChatResponse {
         // Concatenate text blocks; convert tool_use blocks into internal tool calls.
         let mut text = String::new();
         let mut tool_calls = Vec::new();
@@ -571,7 +571,7 @@ fn tool_call_chunk(
 ///
 /// A free function over the byte stream so it is unit-testable without a live
 /// connection. Byte-buffered (see module docs) to preserve multibyte UTF-8.
-fn sse_to_chunks(
+pub(crate) fn sse_to_chunks(
     byte_stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
     model: String,
 ) -> BoxStream<'static, Result<StreamChunk, KgError>> {
