@@ -294,10 +294,37 @@ pub async fn build_state(config: Config, config_path: String) -> SharedState {
             tokens = config.api_tokens.len() + config.admin_token.is_some() as usize,
             "control-plane RBAC enabled"
         );
+    } else if !config.virtual_keys.is_empty() {
+        // Virtual keys close anonymous reads (strict mode) and lock reveal outright, but
+        // the write plane (config mutations) has no credential to require — an anonymous
+        // caller could still edit providers or delete keys.
+        tracing::warn!(
+            "virtual keys are configured but no admin_token / api_tokens — reads require a \
+             key (scoped) and reveal is disabled, but config WRITES are unauthenticated; \
+             set an admin token for production"
+        );
     } else {
         tracing::warn!(
             "no admin_token / api_tokens configured — /api/* and /metrics are UNAUTHENTICATED (set tokens for production)"
         );
+    }
+
+    // Misconfiguration guards for the two-credential model: an empty vkey id would match
+    // an empty bearer, and a vkey id colliding with a control token silently grants that
+    // data-plane client unscoped reads (tokens win on resolution).
+    for vk in &config.virtual_keys {
+        if vk.id.trim().is_empty() {
+            tracing::error!(
+                "a virtual key has an empty id — it can never authenticate (empty bearers \
+                 are rejected); remove it from `virtual_keys`"
+            );
+        } else if auth.identify(&vk.id).is_some() {
+            tracing::warn!(
+                key = %vk.name,
+                "a virtual key id equals a control-plane token — callers presenting it \
+                 resolve as the TOKEN (unscoped, all keys' data); use distinct values"
+            );
+        }
     }
 
     Arc::new(AppState {
@@ -834,16 +861,17 @@ pub fn build_router(state: SharedState) -> Router {
         // an Authorization header), so it lives OUTSIDE the header-only require_admin layer.
         .route("/api/logs/stream", get(handlers::logs_stream));
 
-    // Control-plane, split by RBAC permission (M11):
-    //  - view group   (logs:view)    — reads: logs, stats, config reads, metrics
-    //  - write group  (config:write) — config mutations (providers / virtual keys)
-    //  - reveal group (logs:reveal)  — un-redact captured content
-    let view_group = Router::new()
+    // Control-plane, split by RBAC permission (M11) + read scoping:
+    //  - scoped-read group (logs:view OR a virtual key) — log/session/analytics reads; a
+    //    virtual-key caller is force-scoped to its own rows via the `Caller` extension
+    //  - token-read group  (logs:view, tokens only)     — config reads, metrics, status
+    //  - write group       (config:write)               — config mutations
+    //  - reveal group      (logs:reveal)                — un-redact captured content
+    let scoped_read_group = Router::new()
         .route("/api/logs", get(handlers::logs))
         // Static segment registered alongside the `{id}` param route; matchit prioritizes
         // the static `/api/logs/stats` over `/api/logs/{id}`, so both coexist safely.
         .route("/api/logs/stats", get(handlers::logs_stats))
-        .route("/api/logs/dropped", get(handlers::logs_dropped))
         .route("/api/logs/histogram", get(handlers::logs_histogram))
         .route("/api/logs/timeseries", get(handlers::logs_timeseries))
         .route("/api/logs/rankings", get(handlers::logs_rankings))
@@ -851,16 +879,23 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/logs/{id}", get(handlers::log_detail))
         .route("/api/sessions", get(handlers::sessions))
         .route("/api/sessions/{id}", get(handlers::session_detail))
+        .route("/api/whoami", get(handlers::whoami))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_scoped_read,
+        ));
+
+    let token_read_group = Router::new()
+        .route("/api/logs/dropped", get(handlers::logs_dropped))
         .route("/api/mcp/tools", get(handlers::mcp_tools))
         .route("/api/providers", get(handlers::providers))
         .route("/api/config/providers", get(handlers::get_config_providers))
         .route("/api/config/virtual-keys", get(handlers::get_config_vkeys))
         .route("/metrics", get(handlers::metrics))
-        .route("/api/whoami", get(handlers::whoami))
         .route("/api/status", get(handlers::status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            crate::auth::require_view,
+            crate::auth::require_token_view,
         ));
 
     let write_group = Router::new()
@@ -884,7 +919,10 @@ pub fn build_router(state: SharedState) -> Router {
             crate::auth::require_reveal,
         ));
 
-    let control_plane = view_group.merge(write_group).merge(reveal_group);
+    let control_plane = scoped_read_group
+        .merge(token_read_group)
+        .merge(write_group)
+        .merge(reveal_group);
 
     let timeout_secs = state
         .config

@@ -8,6 +8,7 @@ import {
 } from "next/font/google";
 import { Sidebar } from "@/components/sidebar";
 import { QueryProvider } from "./query-provider";
+import { AuthProvider } from "@/lib/auth-context";
 import { WebGLBackground } from "@/components/baroque/webgl-background";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -73,14 +74,16 @@ export default function RootLayout({
         <WebGLBackground />
         <div aria-hidden className="bg-damask pointer-events-none fixed inset-0 z-[1] opacity-[0.04]" />
         <QueryProvider>
-          <TooltipProvider>
-            <div className="relative z-10 flex h-screen">
-              <Sidebar />
-              <main className="flex-1 overflow-y-auto">
-                <div className="mx-auto max-w-5xl p-8">{children}</div>
-              </main>
-            </div>
-          </TooltipProvider>
+          <AuthProvider>
+            <TooltipProvider>
+              <div className="relative z-10 flex h-screen">
+                <Sidebar />
+                <main className="flex-1 overflow-y-auto">
+                  <div className="mx-auto max-w-5xl p-8">{children}</div>
+                </main>
+              </div>
+            </TooltipProvider>
+          </AuthProvider>
         </QueryProvider>
       </body>
     </html>

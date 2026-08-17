@@ -196,7 +196,7 @@ export function AnalyticsPanel({
         <CardContent className="flex flex-col items-center justify-center gap-2 text-center">
           <div className="text-base font-semibold">Could not load analytics</div>
           <div className="max-w-md text-sm text-muted-foreground">
-            The gateway requires an admin token — click &lsquo;set admin token&rsquo; above.
+            Access token required — see Settings.
           </div>
         </CardContent>
       </Card>

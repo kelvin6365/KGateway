@@ -1,18 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  getStatus,
-  getLogStats,
-  getLogs,
-  getAdminToken,
-  setAdminToken,
-} from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { AuthRequiredError, getStatus, getLogStats, getLogs } from "@/lib/api";
+import { TokenGate } from "@/components/token-gate";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -51,10 +42,6 @@ function ConfigTile({ label, value }: { label: string; value: string }) {
 }
 
 export default function CachePage() {
-  const qc = useQueryClient();
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
-
   const {
     data: status,
     isLoading: statusLoading,
@@ -88,14 +75,7 @@ export default function CachePage() {
     refetchInterval: 10000,
   });
 
-  const authError =
-    (statusErrorObj as Error | undefined)?.message === "admin token required";
-
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    qc.invalidateQueries();
-  }
+  const authError = statusErrorObj instanceof AuthRequiredError;
 
   const hits = stats?.cache_hits ?? 0;
   const total = stats?.total ?? 0;
@@ -103,6 +83,7 @@ export default function CachePage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <TokenGate need="token">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-wide">Cache</h1>
@@ -111,42 +92,14 @@ export default function CachePage() {
             the upstream provider.
           </p>
         </div>
-        <button
-          onClick={() => {
-            setAdminTok(getAdminToken());
-            setShowAdmin((s) => !s);
-          }}
-          className="text-xs text-muted-foreground underline"
-        >
-          {getAdminToken() ? "admin token set" : "set admin token"}
-        </button>
       </div>
-
-      {showAdmin && (
-        <Card>
-          <CardContent className="flex flex-col gap-2">
-            <Label>
-              Admin token (only needed if the gateway has <code>admin_token</code> set)
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                value={adminTok}
-                onChange={(e) => setAdminTok(e.target.value)}
-                placeholder="Bearer token for /api/*"
-              />
-              <Button onClick={saveAdmin}>Save</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {statusError ? (
         <EmptyState
           title="Could not load cache status"
           hint={
             authError
-              ? "The gateway requires an admin token — click ‘set admin token’ above."
+              ? "Access token required — see Settings."
               : "The gateway did not respond to GET /api/status."
           }
         />
@@ -217,6 +170,7 @@ export default function CachePage() {
           </div>
         </>
       )}
+      </TokenGate>
     </div>
   );
 }

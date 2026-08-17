@@ -398,7 +398,7 @@ export default function SessionJourneyPage({ params }: { params: Promise<{ id: s
           {msg === "session not found"
             ? "This session isn't in the recent log window (only recent sessions are grouped)."
             : msg === "admin token required"
-              ? "This gateway requires an admin token — set it on the Sessions page."
+              ? "Access token required — see Settings."
               : `Could not load this session: ${msg}`}
         </CardContent>
       </Card>

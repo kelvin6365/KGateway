@@ -8,11 +8,12 @@ import {
   putVirtualKey,
   deleteVirtualKey,
   getFilterData,
-  getAdminToken,
-  setAdminToken,
+  AuthRequiredError,
   type VirtualKey,
   type VirtualKeyInput,
 } from "@/lib/api";
+import { TokenGate } from "@/components/token-gate";
+import { useAuth } from "@/lib/auth-context";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,8 +55,9 @@ const emptyForm = {
 
 export default function VirtualKeysPage() {
   const qc = useQueryClient();
-  const [adminTok, setAdminTok] = useState("");
-  const [showAdmin, setShowAdmin] = useState(false);
+  // Viewer-role tokens see this page (with masked ids) but cannot mutate keys.
+  const { can } = useAuth();
+  const canWrite = can("config:write");
 
   const {
     data: keys = [],
@@ -116,6 +118,9 @@ export default function VirtualKeysPage() {
       if (editingId === i) resetForm();
       qc.invalidateQueries({ queryKey: ["virtual-keys"] });
     },
+    // Row-level action outside the form — surface the failure (403 for a viewer-role
+    // token, network errors) instead of silently doing nothing.
+    onError: (e: Error) => alert(`Could not delete virtual key: ${e.message}`),
   });
 
   function submit(e: React.FormEvent) {
@@ -134,53 +139,22 @@ export default function VirtualKeysPage() {
     upsert.mutate({ id: form.id.trim(), input });
   }
 
-  function saveAdmin() {
-    setAdminToken(adminTok);
-    setShowAdmin(false);
-    qc.invalidateQueries();
-  }
-
   const editing = editingId !== null;
 
   return (
     <div className="flex flex-col gap-6">
+      <TokenGate need="token">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl font-semibold tracking-wide">Virtual Keys</h1>
           <p className="text-sm text-muted-foreground">
             Per-tenant keys with model allow/deny-lists, rate limits, and token + cost budgets.
-            Clients send <code>Authorization: Bearer &lt;id&gt;</code>.
+            Clients send <code>Authorization: Bearer &lt;id&gt;</code>. Each key can also sign
+            in to this dashboard and call the read APIs (
+            <code>Authorization: Bearer &lt;id&gt;</code>), seeing only its own traffic.
           </p>
         </div>
-        <button
-          onClick={() => {
-            setAdminTok(getAdminToken());
-            setShowAdmin((s) => !s);
-          }}
-          className="text-xs text-muted-foreground underline"
-        >
-          {getAdminToken() ? "admin token set" : "set admin token"}
-        </button>
       </div>
-
-      {showAdmin && (
-        <Card>
-          <CardContent className="flex flex-col gap-2">
-            <Label>
-              Admin token (only needed if the gateway has <code>admin_token</code> set)
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                value={adminTok}
-                onChange={(e) => setAdminTok(e.target.value)}
-                placeholder="Bearer token for /api/*"
-              />
-              <Button onClick={saveAdmin}>Save</Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       <Card className="border-[var(--warning)]">
         <CardContent className="text-sm">
@@ -342,8 +316,8 @@ export default function VirtualKeysPage() {
         <EmptyState
           title="Could not load virtual keys"
           hint={
-            (error as Error)?.message === "admin token required"
-              ? "The gateway requires an admin token — click ‘set admin token’ above."
+            error instanceof AuthRequiredError
+              ? "Access token required — see Settings."
               : "The gateway did not respond to GET /api/config/virtual-keys."
           }
         />
@@ -364,16 +338,36 @@ export default function VirtualKeysPage() {
                   <div className="flex items-center gap-3">
                     <KeyRound size={16} className="text-primary" />
                     <div>
-                      <div className="font-mono text-sm font-semibold">{k.id}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm font-semibold">{k.id}</span>
+                        {k.id_masked && (
+                          <Badge variant="outline" className="text-muted-foreground">
+                            masked
+                          </Badge>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground">{k.name || "—"}</div>
+                      {k.id_masked && (
+                        <div className="text-xs text-muted-foreground">
+                          The id is the bearer secret — an operator or admin token is needed
+                          to see and edit it.
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
                     <Button
                       variant="ghost"
                       size="icon"
+                      disabled={k.id_masked || !canWrite}
                       onClick={() => startEdit(k)}
-                      title="Edit key"
+                      title={
+                        !canWrite
+                          ? "Requires an operator or admin token"
+                          : k.id_masked
+                            ? "Masked id — cannot edit"
+                            : "Edit key"
+                      }
                     >
                       <Pencil size={14} />
                     </Button>
@@ -381,10 +375,17 @@ export default function VirtualKeysPage() {
                       variant="ghost"
                       size="icon"
                       className="text-destructive"
+                      disabled={k.id_masked || !canWrite}
                       onClick={() => {
                         if (confirm(`Delete virtual key "${k.id}"?`)) remove.mutate(k.id);
                       }}
-                      title="Delete key"
+                      title={
+                        !canWrite
+                          ? "Requires an operator or admin token"
+                          : k.id_masked
+                            ? "Masked id — cannot delete"
+                            : "Delete key"
+                      }
                     >
                       <Trash2 size={15} />
                     </Button>
@@ -435,6 +436,7 @@ export default function VirtualKeysPage() {
           ))}
         </div>
       )}
+      </TokenGate>
     </div>
   );
 }

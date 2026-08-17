@@ -8,6 +8,40 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **Honest startup banner + start.sh dashboard prompt.** `./scripts/start.sh` now asks
+  "start the dashboard too?" (default yes; `KGATEWAY_START_UI=1|0` answers it
+  non-interactively, no-TTY defaults to no) and, on yes, installs/starts the Next.js UI
+  alongside the gateway and stops it with Ctrl-C. The server banner no longer prints a
+  hardcoded `http://<host>:3000` Dashboard URL when nothing is serving it: the URL shows
+  only when the starter passes `KGATEWAY_DASHBOARD_URL`; otherwise the row reads
+  "not running" with the command to start it.
+
+- **"Star on GitHub" in the dashboard sidebar.** A repo link with a live star count
+  (unauthenticated GitHub API, cached an hour, silently omitted when unavailable). Also
+  fixed the stale `repository` URL in `Cargo.toml`.
+
+- **Per-virtual-key data scoping + a clear access model.** Virtual keys can now sign in to
+  the read APIs: `Authorization: Bearer <key-id>` on `/api/logs*`, `/api/sessions*`,
+  `/api/whoami` and the SSE tail authenticates, with every response **force-scoped
+  server-side** to that key's own traffic — the caller's `virtual_key` filter param is
+  ignored, another key's `/api/logs/{id}` / `/api/sessions/{id}` returns the same 404 as a
+  missing id, `filterdata` can't enumerate the key roster, and the live tail only carries
+  the key's own events. Control-plane access tokens (viewer / operator / admin) are
+  unchanged and always see all keys' data; role still gates config writes and reveal. Once
+  any virtual key exists, anonymous reads end (mirroring data-plane strict mode); a fully
+  token-less, key-less config stays open as before. `GET /api/whoami` now reports the
+  resolved identity (`kind`: `token` / `virtual_key` / `open`, plus `name` and `scoped_to`),
+  and `GET /api/config/virtual-keys` masks key ids (`id_masked: true`) for viewer-role
+  callers — the id is the bearer secret, so only `config:write` holders receive it.
+  `LogStore::filter_values` now takes a `LogFilter` (memory / SQLite / Postgres).
+
+- **Dashboard: one sign-in, visible identity.** The ~8 duplicated per-page admin-token
+  prompts are replaced by a shared `TokenGate` + `AuthProvider` (`useAuth()`), a sidebar
+  identity badge (role / virtual-key + permissions from `/api/whoami`), and a Settings
+  "Tokens & access" card explaining access tokens vs virtual keys. Signing in with a
+  virtual key shows a scoped dashboard (own traffic only) and explains why config pages
+  need an admin credential; masked key ids render read-only.
+
 - **Ten new providers — provider parity with the reference gateway (25 → 35 named providers).**
   Three are OpenAI-wire and cost one line each in `openai_compat::KNOWN`: **Opencode Zen**
   (`https://opencode.ai/zen/v1`), **Opencode Go** (`https://opencode.ai/zen/go/v1`, which nests
