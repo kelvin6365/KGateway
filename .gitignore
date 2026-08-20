@@ -27,3 +27,5 @@ ui/.env*.local
 *.sqlite
 /data
 /b*
+.gstack/
+.codegraph/

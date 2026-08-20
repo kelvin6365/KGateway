@@ -21,34 +21,115 @@ Built in Rust. **~3.5 µs** of overhead per request.
 ![KGateway dashboard](docs/images/dashboard.png)
 
 <details>
-<summary><b>More screenshots</b> — request tracing, logs, playground, providers</summary>
+<summary><b>The whole dashboard</b> — every page, captured from a live gateway carrying real traffic</summary>
 
-### Per-request tracing
+<br>
 
-Every request records a stage-by-stage waterfall. Here a call to a self-hosted node fails in
-439 µs, fails over to a second provider, and still streams a first token 2.29 s in — the client
-never sees the failure.
+Each shot below is a running instance, not a mockup: a coding agent working through this
+repository via the gateway, plus a deliberately dead provider to prove failover.
+
+---
+
+**See what's happening**
+
+### Per-request tracing — `/logs/{id}`
+
+Every request records a stage-by-stage waterfall. Here a **streamed** call to a self-hosted node
+fails in 32 ms, fails over to a second provider, and still delivers a first token 2.18 s in — the
+client never sees the failure, only a normal `200`.
 
 ![Request trace waterfall](docs/images/request-trace.png)
 
-### Logs
+### Logs — `/logs`
 
-Filter by provider, model, virtual key, status, or free text; tail live traffic over SSE.
+One row per call: provider, model, virtual key, status, latency, tokens in/out, cost. Filter on
+any of them, search request ids and errors, or tail live traffic over SSE.
 
 ![Request logs](docs/images/logs.png)
 
-### Playground
+### Analytics — `/logs` → Analytics
 
-Multi-turn, streaming, against any configured `provider/model`.
+Latency, cost and token *distribution* — not just averages — plus rankings by count, cost, tokens
+or errors.
 
-![Playground](docs/images/playground.png)
+![Analytics](docs/images/analytics.png)
 
-### Providers
+### Sessions — `/sessions`
+
+Calls carrying an `x-session-id` (or an OpenAI `user`) are grouped into runs, so a coding agent's
+whole task shows up as one row with its own spend, tokens, and duration — live, while it runs.
+
+![Sessions](docs/images/sessions.png)
+
+### Session journey — `/sessions/{id}`
+
+The full run: every call, where the spend went by model, the success/cache/error split, and the
+provider → model → outcome flow.
+
+![Session journey](docs/images/session-journey.png)
+
+---
+
+**Control what goes through**
+
+### Providers — `/providers`
 
 Connect a provider from the catalog — changes persist to `config.json` and hot-reload without a
 restart.
 
 ![Providers](docs/images/providers.png)
+
+### Virtual keys — `/virtual-keys`
+
+Issue a key with a model allow/deny-list, a rate limit, a token budget and a USD cost ceiling.
+Your upstream provider keys never leave the gateway.
+
+![Virtual keys](docs/images/virtual-keys.png)
+
+### Plugins — `/plugins`
+
+The request pipeline and which stages are actually on. Redaction you *think* is enabled is worse
+than none, so this page reports state rather than letting you toggle it.
+
+![Plugins](docs/images/plugins.png)
+
+### Semantic cache — `/cache`
+
+Hit rate and stored entries for the two-tier cache. Shown here unconfigured — it needs an
+`embedding_provider` in the config.
+
+![Cache](docs/images/cache.png)
+
+### MCP tools — `/mcp`
+
+Tools discovered from MCP servers and injected into requests, with the gateway executing the
+calls and feeding results back. Not enabled in this instance.
+
+![MCP tools](docs/images/mcp.png)
+
+---
+
+**Use it**
+
+### API reference — `/docs`
+
+Every endpoint, generated from the server's own route table, with runnable cURL / Python /
+JavaScript examples. A drift test fails the build if this page and the router ever disagree.
+
+![API reference](docs/images/api-docs.png)
+
+### Playground — `/playground`
+
+Multi-turn, streaming, against any configured `provider/model`.
+
+![Playground](docs/images/playground.png)
+
+### Settings — `/settings`
+
+Read-only view of the live configuration — version, storage, auth mode, timeouts, providers,
+feature flags — plus what each credential type can see.
+
+![Settings](docs/images/settings.png)
 
 </details>
 
@@ -64,32 +145,58 @@ restart.
   answers near-duplicate prompts without touching a provider.
 - **You can see everything.** Per-request waterfall traces, filterable audit logs with live SSE
   tail, analytics, Prometheus `/metrics`, OTLP export — and a full Next.js dashboard.
+- **Agent runs are one row, not fifty.** Calls are grouped into **sessions**, so a coding agent's
+  whole task shows its own spend, tokens, and outcome while it's still running.
 - **It's fast.** The full production pipeline (logging + governance) adds **~3.5 µs** per
   request ([benchmarks](docs/15-performance.md)).
 
 ## Quick start
 
-### Option A — Docker (nothing to install but Docker)
+### Option A — one command (generates a config from your env)
 
 ```bash
 git clone https://github.com/kelvin6365/KGateway.git && cd KGateway
-cp config.example.json config.json
-OPENAI_API_KEY=sk-... docker compose up --build
+OPENAI_API_KEY=sk-... ./scripts/start.sh
 ```
+
+Writes a `config.json` from whatever keys are in your environment, builds, asks whether to start
+the dashboard alongside, and runs both (`KGATEWAY_START_UI=1|0` answers that prompt
+non-interactively).
 
 ### Option B — from source (Rust 1.88+)
 
 ```bash
 git clone https://github.com/kelvin6365/KGateway.git && cd KGateway
-cp config.example.json config.json
+
+cat > config.json <<'JSON'
+{
+  "port": 8080,
+  "database": "sqlite://./kgateway.db?mode=rwc",
+  "providers": {
+    "openai": { "keys": [{ "id": "default", "value": "${OPENAI_API_KEY}", "weight": 1 }] }
+  }
+}
+JSON
+
 export OPENAI_API_KEY=sk-...
 cargo run -p kgateway-server -- --config config.json
 # → kgateway listening on 0.0.0.0:8080
 ```
 
-(Or let `./scripts/start.sh` generate a config from whatever keys are in your env, ask
-whether to start the dashboard alongside, and run everything in one step —
-`KGATEWAY_START_UI=1|0` answers the prompt non-interactively.)
+### Option C — Docker (nothing to install but Docker)
+
+Same `config.json` as above, but point the database at the container's data volume
+(`"database": "sqlite:///data/kgateway.db?mode=rwc"`), then:
+
+```bash
+OPENAI_API_KEY=sk-... docker compose up --build
+```
+
+> **On `config.example.json`:** it's a *reference* showing every field, not a starter config.
+> It declares an `admin_token` and a `virtual_keys` entry — so copying it as-is turns on
+> strict mode (every request needs `Authorization: Bearer vk_team_alpha`) and, if
+> `KGATEWAY_ADMIN_TOKEN` is unset, locks the control plane fail-closed. Start from the minimal
+> config above and add fields from the example as you need them.
 
 ### Send your first request
 
@@ -150,12 +257,12 @@ Setup guides for Claude Code, the OMP CLI, and the Pi CLI — including the comm
 | Area | Capabilities |
 |---|---|
 | **API** | OpenAI-compatible `/v1/chat/completions` (JSON + SSE), `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, aggregated `/v1/models`, plus **Anthropic-compatible `/v1/messages`** ingress. Full request-param fidelity (`seed`, `response_format`, penalties, tool-choice, …) and an `extra` passthrough so no client field is dropped. |
-| **Providers (25)** | **Native:** OpenAI, Anthropic, Cohere, Amazon Bedrock, Google Gemini, Azure OpenAI. **OpenAI-compatible:** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, z.ai GLM, Moonshot (Kimi), MiniMax, Ollama, vLLM, SGLang. See the [verification-status table](docs/03-providers.md#verification-status). |
+| **Providers (25)** | **Native (6):** OpenAI, Anthropic, Cohere, Amazon Bedrock, Google Gemini, Azure OpenAI. **OpenAI-compatible (19):** Groq, OpenRouter, xAI, DeepSeek, Cerebras, Perplexity, Together, Fireworks, Parasail, Mistral, Nebius, HuggingFace, z.ai GLM (`zai` pay-as-you-go + `zai-coding` Coding Plan), Moonshot (Kimi), MiniMax, Ollama, vLLM, SGLang. Any other OpenAI/Anthropic/Bedrock/Gemini/Azure-wire endpoint registers under a custom name via `kind`. See the [verification-status table](docs/03-providers.md#verification-status). |
 | **Routing** | Primary + `fallbacks[]` provider failover, weighted key selection, per-key retry with backoff + jitter, per-provider concurrency isolation, dead-key vs used-key rotation — on unary **and** streaming. |
 | **Governance** | Virtual keys: model allow/deny-lists, request rate limits, token budgets, per-period USD cost budgets. In-process counters by default, **shared Postgres** for horizontal scaling. |
 | **Caching** | Two-tier semantic cache (exact-hash tier + embedding similarity), params/model-scoped. In-memory or persistent **pgvector** (survives restart, shared across replicas). |
 | **Security** | Reversible AES-256-GCM redaction of captured bodies, RBAC (viewer/operator/admin) with fail-closed tokens, audited reveal. |
-| **Observability** | Request audit log (filters + pagination + SSE tail), **per-request call tracing** (stage-by-stage waterfall incl. failed retries and time-to-first-token), analytics, opt-in content capture, Prometheus `/metrics`, **OTLP** traces + metrics with W3C `traceparent` propagation. |
+| **Observability** | Request audit log (filters + pagination + SSE tail), **per-request call tracing** (stage-by-stage waterfall incl. failed retries and time-to-first-token), **session grouping** (agent runs rolled up by `x-session-id` with per-run spend + a call-by-call journey), connected-client detection, analytics, opt-in content capture, Prometheus `/metrics`, **OTLP** traces + metrics with W3C `traceparent` propagation. |
 | **MCP** | Agentic tool-calling over in-process + stdio MCP servers: discover → inject → execute → re-prompt. |
 | **Docs for agents** | `/openapi.json`, `/llms.txt`, `/llms-full.txt`, and per-endpoint Markdown served straight off the gateway — generated from the route table and pinned to it by a test. |
 | **Persistence** | SQLite (default) and Postgres behind store traits; in-memory fallback. |
@@ -185,7 +292,8 @@ overhead, no network). Full detail in [`docs/15-performance.md`](docs/15-perform
 ### Run the backend
 
 ```bash
-cp config.example.json config.json   # gitignored; keys come from ${ENV}, never hard-coded
+# config.json is gitignored; keys come from ${ENV}, never hard-coded.
+# Start minimal (see Quick start) and add fields from config.example.json as needed.
 export OPENAI_API_KEY=sk-...
 cargo run -p kgateway-server -- --config config.json
 ```
@@ -207,7 +315,7 @@ Every change should leave this green — it's what CI runs:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace                 # ~230 tests; no live DB or API keys required
+cargo test --workspace                 # 285 tests; no live DB or API keys required
 # if ui/ changed:
 pnpm --dir ui lint && pnpm --dir ui build
 ```

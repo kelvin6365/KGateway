@@ -1,0 +1,12 @@
+# Dependencies allowed to run install scripts. Both are native modules that legitimately
+# need one: `sharp` (Next.js image optimization) and `unrs-resolver` (eslint module
+# resolution). Without this, pnpm 10+ aborts `pnpm install` with ERR_PNPM_IGNORED_BUILDS.
+# `allowBuilds` is the pnpm 11 spelling; `onlyBuiltDependencies` is pnpm 10's — both are
+# listed so either version installs cleanly.
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
+
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver

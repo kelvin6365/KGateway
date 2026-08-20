@@ -8,6 +8,16 @@ collected under a single `Unreleased` section until the first tagged release.
 
 ### Added
 
+- **README now shows the whole dashboard — 14 pages, captured from a live instance.** The old
+  README carried five screenshots; it now walks every page (tracing, logs, analytics, sessions,
+  session journey, providers, virtual keys, plugins, cache, MCP, API reference, playground,
+  settings) grouped into see / control / use, each with its route and what it's for. All shots
+  come from a running gateway carrying real coding-agent traffic rather than mockups. **Sessions**
+  appears for the first time despite being one of the dashboard's headline views, and the tracing
+  shot now shows a *streamed* failover (self-hosted node dies in 32 ms, second provider delivers a
+  first token 2.18 s in, client sees a normal `200`) instead of the older unary capture. Session
+  grouping and connected-client detection are now listed in the feature table.
+
 - **Honest startup banner + start.sh dashboard prompt.** `./scripts/start.sh` now asks
   "start the dashboard too?" (default yes; `KGATEWAY_START_UI=1|0` answers it
   non-interactively, no-TTY defaults to no) and, on yes, installs/starts the Next.js UI
@@ -138,6 +148,30 @@ collected under a single `Unreleased` section until the first tagged release.
   admin token, so the picker is useful for non-admin users too.
 
 ### Fixed
+
+- **The documented quick start no longer produces a locked gateway.** `cp config.example.json
+  config.json` was the first instruction in the README, but the example config is a *reference*
+  that declares every field — including an `admin_token` and a `virtual_keys` entry. Following it
+  literally meant (1) the data plane flipped to strict mode, so the README's own example `curl`
+  answered 401; (2) with `KGATEWAY_ADMIN_TOKEN` unset, the `admin_token` resolved empty and the
+  fail-closed guard locked the whole control plane, taking the dashboard down with it; and
+  (3) its SQLite path (`/var/lib/kgateway/`) matched neither the Dockerfile's `/data` nor the
+  compose volume, so the container had nowhere writable to open the DB. The quick start now
+  leads with `./scripts/start.sh`, shows a minimal runnable `config.json` for source and Docker
+  runs, and states plainly what copying the example turns on. `config.example.json`'s database
+  path now points at `/data`, matching the image and the compose volume.
+
+- **`pnpm install` in `ui/` no longer aborts on pnpm 10+.** `sharp` and `unrs-resolver` are
+  native modules that need install scripts, which pnpm now blocks by default —
+  `ERR_PNPM_IGNORED_BUILDS` failed the install outright, so the documented dashboard setup (and
+  `scripts/start.sh`'s dashboard leg) could not complete without an interactive
+  `pnpm approve-builds`. A committed `ui/pnpm-workspace.yaml` allows exactly those two builds,
+  spelled for both pnpm 10 (`onlyBuiltDependencies`) and pnpm 11 (`allowBuilds`).
+
+- **Provider counts agreed across docs.** `docs/03-providers.md` claimed 20 connectors and its
+  list omitted Fireworks and Parasail, while the README claimed 25. The registry has 25 (6 native
+  + 19 OpenAI-compatible, counting `zai` and `zai-coding` separately); both documents now say so
+  and the README's list makes the two z.ai entries explicit.
 
 - **Analytics no longer capped at the last 10,000 requests (SQL push-down).** The SQLite and
   Postgres log stores now push filtering, sorting, pagination, and every aggregate

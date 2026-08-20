@@ -1,6 +1,6 @@
 {
   "port": 8080,
-  "database": "sqlite:///var/lib/kgateway/kgateway.db?mode=rwc",
+  "database": "sqlite:///data/kgateway.db?mode=rwc",
   "admin_token": "${KGATEWAY_ADMIN_TOKEN}",
   "providers": {
     "openai": {
