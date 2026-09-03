@@ -51,9 +51,12 @@ jobs:
         working-directory: ui
     steps:
       - uses: actions/checkout@v4
+      # pnpm 9 hard-fails on a settings-only pnpm-workspace.yaml (no `packages:`
+      # field, the pnpm 10/11 form). `packageManager` in ui/package.json is the
+      # single source of truth for the pnpm version.
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          package_json_file: ui/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 20
